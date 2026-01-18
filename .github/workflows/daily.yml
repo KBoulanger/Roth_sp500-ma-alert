@@ -1,4 +1,4 @@
-name: Daily SPY SMA100 Telegram
+name: Daily SPY SMA50 Telegram
 
 on:
   schedule:
@@ -19,7 +19,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - run: python send_spy_ma100_telegram.py
+      - run: python send_spy_ma50_telegram.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
