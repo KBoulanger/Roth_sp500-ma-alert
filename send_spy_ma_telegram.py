@@ -288,6 +288,7 @@ def main():
     # --- Top-5 Strategy ---
     lines.append(f"<b>Top-5 Strategy</b>")
     lines.append(f"➤ <b>HOLD: {top5_position}</b>")
+    lines.append(f"SMA50: {sma50_value:.2f}")
     lines.append(f"SPY vs SMA50: {'ABOVE' if above_50 else 'BELOW'}")
 
     if top5_status == "INVESTED":
@@ -307,6 +308,7 @@ def main():
     # --- SP500 Holdings ---
     lines.append(f"<b>SP500 Holdings</b>")
     lines.append(f"➤ <b>HOLD: {sp500_position}</b>")
+    lines.append(f"SMA250: {sma250_value:.2f}")
     lines.append(f"SPY vs SMA250: {'ABOVE' if above_250 else 'BELOW'}")
 
     if sp500_status == "INVESTED":
