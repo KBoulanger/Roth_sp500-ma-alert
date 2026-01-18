@@ -87,7 +87,6 @@ def compute_streaks(close: pd.Series, sma: pd.Series) -> tuple[int, int]:
                 below_streak += 1
             else:
                 break
-    # else: equal -> both 0
 
     return above_streak, below_streak
 
@@ -110,29 +109,29 @@ def main() -> None:
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
     chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
 
-    # --- SPY prices + SMA100 ---
+    # --- SPY prices + SMA50 ---
     spy = fetch_spy_history()
 
-    spy["SMA100"] = spy["Close"].rolling(100, min_periods=100).mean()
-    spy = spy.dropna(subset=["SMA100"]).copy().reset_index(drop=True)
+    spy["SMA50"] = spy["Close"].rolling(50, min_periods=50).mean()
+    spy = spy.dropna(subset=["SMA50"]).copy().reset_index(drop=True)
     if spy.empty:
-        raise RuntimeError("Not enough data to compute SMA100 (need >=100 trading days).")
+        raise RuntimeError("Not enough data to compute SMA50 (need >=50 trading days).")
 
     last = spy.iloc[-1]
     asof_trading_dt = pd.to_datetime(last["Date"])
     asof_trading_date = asof_trading_dt.date().isoformat()
 
     close_last = float(last["Close"])
-    sma_last = float(last["SMA100"])
+    sma_last = float(last["SMA50"])
 
-    above_streak, below_streak = compute_streaks(spy["Close"], spy["SMA100"])
+    above_streak, below_streak = compute_streaks(spy["Close"], spy["SMA50"])
     status = "ABOVE" if close_last > sma_last else ("BELOW" if close_last < sma_last else "AT")
 
-    # Rule mapping (MA100 / E20 / R5)
+    # Rule mapping (MA50 / E20 / R5)
     exit_signal = (below_streak >= 20)
     reentry_signal = (above_streak >= 5)
 
-    # --- UNRATE monthly, no lag, true 3-month change (3 monthly observations earlier) ---
+    # --- UNRATE monthly, no lag, true 3-month change ---
     un_m = fetch_unrate_monthly()
     un_m = un_m[un_m["DATE"] <= asof_trading_dt].copy()
 
@@ -144,18 +143,18 @@ def main() -> None:
     un_prior_date = None
 
     if len(un_m) >= 4:
-        current = un_m.iloc[-1]   # most recent UNRATE obs date <= trading date
-        prior = un_m.iloc[-4]     # exactly 3 monthly observations earlier
+        current = un_m.iloc[-1]
+        prior = un_m.iloc[-4]
 
         un_now = float(current["UNRATE"])
         un_prior = float(prior["UNRATE"])
         un_chg = un_now - un_prior
-        un_flag = (un_chg > 0.3)
+        un_flag = (un_chg > 0. қилип)
 
         un_now_date = current["DATE"].date().isoformat()
         un_prior_date = prior["DATE"].date().isoformat()
 
-    # Safe-asset suggestion ONLY if an exit is triggered (tiered severity concept)
+    # Safe-asset suggestion ONLY if an exit is triggered
     safe_suggestion = "N/A (no exit signal)"
     if exit_signal:
         if un_flag is None:
@@ -165,14 +164,14 @@ def main() -> None:
         else:
             safe_suggestion = "SPY / S&P 500 exposure (UNRATE rising flag OFF)"
 
-    # --- Telegram message (explicit UNRATE dates + account label) ---
+    # --- Telegram message ---
     lines = []
-    lines.append(f"<b>{ACCOUNT_LABEL} ACCOUNT — SPY vs SMA100</b>")
+    lines.append(f"<b>{ACCOUNT_LABEL} ACCOUNT — SPY vs SMA50</b>")
     lines.append(f"Account: <b>{ACCOUNT_LABEL}</b>")
     lines.append("")
     lines.append(f"Price as-of (trading day): {asof_trading_date}")
     lines.append(f"Close: {close_last:.2f}")
-    lines.append(f"SMA100: {sma_last:.2f}")
+    lines.append(f"SMA50: {sma_last:.2f}")
     lines.append(f"Status: <b>{status}</b>")
     lines.append("")
     lines.append(f"Above streak: {above_streak}")
