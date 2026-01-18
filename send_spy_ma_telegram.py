@@ -1,203 +1,109 @@
-import io
-import os
-import pandas as pd
-import requests
+# ============================
+# ADD: MA250_E80_R5 (SP500 holdings) COMPUTATION
+# Place this right after your existing SMA50/streak/exit/reentry computation
+# (i.e., after you have `df`, `latest`, `latest_date`, `latest_close`, and the MA50 vars)
+# ============================
 
-# Prices (daily)
-STOOQ_CSV_URL = "https://stooq.com/q/d/l/?s=spy.us&i=d"
+df["SMA250"] = df["Close"].rolling(250).mean()
 
-# Unemployment (monthly) from FRED as CSV (no API key)
-FRED_UNRATE_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE"
+latest = df.iloc[-1]
+prev = df.iloc[:-1]
 
-# Labeling (so alerts are unambiguous)
-ACCOUNT_LABEL = "ROTH"  # change to "BROKERAGE" later if you clone this bot
+above_250 = bool(latest["Close"] > latest["SMA250"])
+below_250 = bool(latest["Close"] < latest["SMA250"])
 
-
-def fetch_spy_history() -> pd.DataFrame:
-    r = requests.get(STOOQ_CSV_URL, timeout=30)
-    r.raise_for_status()
-    df = pd.read_csv(io.StringIO(r.text))
-    df.columns = [c.strip() for c in df.columns]
-    df["Date"] = pd.to_datetime(df["Date"])
-    return df.sort_values("Date").reset_index(drop=True)
-
-
-def fetch_unrate_monthly() -> pd.DataFrame:
-    """
-    Fetch monthly UNRATE from FRED and return a DataFrame with columns:
-      DATE (datetime64), UNRATE (float)
-
-    Robust to FRED column naming differences and whitespace/BOM issues.
-    """
-    r = requests.get(FRED_UNRATE_CSV_URL, timeout=30)
-    r.raise_for_status()
-    df = pd.read_csv(io.StringIO(r.text))
-
-    # Normalize column names
-    df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
-    lower_map = {c.lower(): c for c in df.columns}
-
-    # Identify date column
-    date_col = None
-    for candidate in ("date", "observation_date"):
-        if candidate in lower_map:
-            date_col = lower_map[candidate]
-            break
-    if date_col is None:
-        raise RuntimeError(f"Could not find a date column in FRED CSV. Columns: {list(df.columns)}")
-
-    # Identify value column
-    if "unrate" in lower_map:
-        val_col = lower_map["unrate"]
-    else:
-        non_date_cols = [c for c in df.columns if c != date_col]
-        if len(non_date_cols) != 1:
-            raise RuntimeError(f"Could not uniquely identify UNRATE column. Columns: {list(df.columns)}")
-        val_col = non_date_cols[0]
-
-    out = df[[date_col, val_col]].copy()
-    out = out.rename(columns={date_col: "DATE", val_col: "UNRATE"})
-    out["DATE"] = pd.to_datetime(out["DATE"])
-    out["UNRATE"] = pd.to_numeric(out["UNRATE"], errors="coerce")
-    out = out.dropna(subset=["UNRATE"]).sort_values("DATE").reset_index(drop=True)
-    return out
-
-
-def compute_streaks(close: pd.Series, sma: pd.Series) -> tuple[int, int]:
-    """
-    Returns (above_streak, below_streak) counted from the most recent day backward.
-    Equality breaks both streaks (strict > and <).
-    Assumes close and sma are aligned and contain no NaNs.
-    """
-    above_streak = 0
-    below_streak = 0
-
-    last_close = float(close.iloc[-1])
-    last_sma = float(sma.iloc[-1])
-
-    if last_close > last_sma:
-        for c, m in zip(reversed(close.tolist()), reversed(sma.tolist())):
-            if c > m:
-                above_streak += 1
-            else:
-                break
-    elif last_close < last_sma:
-        for c, m in zip(reversed(close.tolist()), reversed(sma.tolist())):
-            if c < m:
-                below_streak += 1
-            else:
-                break
-
-    return above_streak, below_streak
-
-
-def send_telegram(bot_token: str, chat_id: str, text: str) -> None:
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    requests.post(
-        url,
-        data={
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        },
-        timeout=30,
-    ).raise_for_status()
-
-
-def main() -> None:
-    bot_token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-    chat_id = os.environ["TELEGRAM_CHAT_ID"].strip()
-
-    # --- SPY prices + SMA50 ---
-    spy = fetch_spy_history()
-
-    spy["SMA50"] = spy["Close"].rolling(50, min_periods=50).mean()
-    spy = spy.dropna(subset=["SMA50"]).copy().reset_index(drop=True)
-    if spy.empty:
-        raise RuntimeError("Not enough data to compute SMA50 (need >=50 trading days).")
-
-    last = spy.iloc[-1]
-    asof_trading_dt = pd.to_datetime(last["Date"])
-    asof_trading_date = asof_trading_dt.date().isoformat()
-
-    close_last = float(last["Close"])
-    sma_last = float(last["SMA50"])
-
-    above_streak, below_streak = compute_streaks(spy["Close"], spy["SMA50"])
-    status = "ABOVE" if close_last > sma_last else ("BELOW" if close_last < sma_last else "AT")
-
-    # Rule mapping (MA50 / E20 / R5)
-    exit_signal = (below_streak >= 20)
-    reentry_signal = (above_streak >= 5)
-
-    # --- UNRATE monthly, no lag, true 3-month change ---
-    un_m = fetch_unrate_monthly()
-    un_m = un_m[un_m["DATE"] <= asof_trading_dt].copy()
-
-    un_flag = None
-    un_now = None
-    un_prior = None
-    un_chg = None
-    un_now_date = None
-    un_prior_date = None
-
-    if len(un_m) >= 4:
-        current = un_m.iloc[-1]
-        prior = un_m.iloc[-4]
-
-        un_now = float(current["UNRATE"])
-        un_prior = float(prior["UNRATE"])
-        un_chg = un_now - un_prior
-        un_flag = (un_chg > 0.3)
-
-        un_now_date = current["DATE"].date().isoformat()
-        un_prior_date = prior["DATE"].date().isoformat()
-
-    # Safe-asset suggestion ONLY if an exit is triggered
-    safe_suggestion = "N/A (no exit signal)"
-    if exit_signal:
-        if un_flag is None:
-            safe_suggestion = "Exit signal YES, but UNRATE 3-month change unavailable"
-        elif un_flag:
-            safe_suggestion = "Treasuries (UNRATE rising flag ON)"
+def count_streak(series: pd.Series) -> int:
+    c = 0
+    for v in reversed(series.to_list()):
+        if bool(v):
+            c += 1
         else:
-            safe_suggestion = "SPY / S&P 500 exposure (UNRATE rising flag OFF)"
+            break
+    return c
 
-    # --- Telegram message ---
-    lines = []
-    lines.append(f"<b>{ACCOUNT_LABEL} ACCOUNT — SPY vs SMA50</b>")
-    lines.append(f"Account: <b>{ACCOUNT_LABEL}</b>")
-    lines.append("")
-    lines.append(f"Price as-of (trading day): {asof_trading_date}")
-    lines.append(f"Close: {close_last:.2f}")
-    lines.append(f"SMA50: {sma_last:.2f}")
-    lines.append(f"Status: <b>{status}</b>")
-    lines.append("")
-    lines.append(f"Above streak: {above_streak}")
-    lines.append(f"Below streak: {below_streak}")
-    lines.append("")
-    lines.append(f"Exit trigger (≥20 below): <b>{'YES' if exit_signal else 'no'}</b>")
-    lines.append(f"Reentry trigger (≥5 above): <b>{'YES' if reentry_signal else 'no'}</b>")
-    lines.append("")
+above_streak_250 = count_streak(prev["Close"] > prev["SMA250"])
+below_streak_250 = count_streak(prev["Close"] < prev["SMA250"])
 
-    lines.append("<b>UNRATE (FRED, monthly; no lag)</b>")
-    if un_flag is None:
-        lines.append("UNRATE as-of date: NA (need >=4 monthly observations up to today)")
-        lines.append("UNRATE 3-mo prior date: NA")
-        lines.append("3-mo change: NA")
-        lines.append("UNRATE rising flag (>0.3): NA")
+exit_250 = below_streak_250 >= 80
+reentry_250 = above_streak_250 >= 5
+
+
+# ============================
+# REPLACE: your existing message-building block (where you do `lines = []` etc.)
+# with the block below. This keeps your existing Top-K / MA50 / UNRATE fields,
+# but formats the message exactly as requested and adds the MA250_E80_R5 section.
+# ============================
+
+lines = []
+
+lines.append(f"<b>{ACCOUNT_LABEL} ACCOUNT</b>")
+lines.append("")
+lines.append(f"SPY Price as-of (trading day): {latest_date}")
+lines.append(f"Close: {latest_close:.2f}")
+lines.append("")
+
+# ----------------------------
+# MA50_E20_R5 (TopK overlay)
+# Assumes you already have:
+#   above_50, below_50, above_streak_50, below_streak_50, exit_50, reentry_50
+# and UNRATE values:
+#   un_now_date, un_now, un_prior_date, un_prior, un_chg, un_flag
+# ----------------------------
+lines.append("<b>MA50_E20_R5:</b>")
+lines.append(f"SMA50: {latest['SMA50']:.2f}")
+lines.append(f"SMA50 Status: <b>{'ABOVE' if above_50 else 'BELOW'}</b>")
+lines.append(f"SMA50 Above streak: {above_streak_50}")
+lines.append(f"SMA50 Below streak: {below_streak_50}")
+lines.append("")
+lines.append(f"Exit trigger (≥20 below): {'YES' if exit_50 else 'NO'}")
+lines.append(f"Reentry trigger (≥5 above): {'YES' if reentry_50 else 'NO'}")
+lines.append("")
+lines.append("UNRATE (FRED, monthly; no lag)")
+lines.append(f"UNRATE as-of date: {un_now_date} → {un_now:.1f}%")
+lines.append(f"UNRATE 3-mo prior: {un_prior_date} → {un_prior:.1f}%")
+lines.append(f"UNRATE 3-mo change: {un_chg:.2f} pp")
+lines.append(f"UNRATE rising flag (>0.3): <b>{'ON' if un_flag else 'OFF'}</b>")
+lines.append("")
+
+# [ADD INSTRUCTION HERE 1] — TopK instructions
+# Example requested: if below MA50 for >=20 days evaluate UNRATE; if UNRATE triggered -> treasuries else SP500.
+if exit_50:
+    if un_flag:
+        instr1 = "TopK: Exit equities → move to Treasuries"
     else:
-        lines.append(f"UNRATE as-of date: {un_now_date} → {un_now:.1f}%")
-        lines.append(f"UNRATE 3-mo prior: {un_prior_date} → {un_prior:.1f}%")
-        lines.append(f"UNRATE 3-mo change: {un_chg:.2f} pp")
-        lines.append(f"UNRATE rising flag (>0.3): <b>{'ON' if un_flag else 'OFF'}</b>")
+        instr1 = "TopK: Exit equities → move to SP500"
+else:
+    instr1 = "TopK: Stay invested in TopK equities"
 
-    lines.append("")
-    lines.append(f"<b>If exit signal is YES → safe asset:</b> {safe_suggestion}")
+lines.append("<b>What to do today (TopK):</b>")
+lines.append(instr1)
+lines.append("")
+lines.append("")
 
-    send_telegram(bot_token, chat_id, "\n".join(lines))
+# ----------------------------
+# MA250_E80_R5 (SP500 holdings)
+# ----------------------------
+lines.append("<b>MA250_E80_R5:</b>")
+lines.append(f"SMA250: {latest['SMA250']:.2f}")
+lines.append(f"SMA250 Status: <b>{'ABOVE' if above_250 else 'BELOW'}</b>")
+lines.append(f"SMA250 Above streak: {above_streak_250}")
+lines.append(f"SMA250 Below streak: {below_streak_250}")
+lines.append("")
+lines.append(f"Exit trigger (≥80 below): {'YES' if exit_250 else 'NO'}")
+lines.append(f"Reentry trigger (≥5 above): {'YES' if reentry_250 else 'NO'}")
+lines.append("")
 
+# [ADD INSTRUCTION HERE 2] — SP500 instructions
+# Example requested: if below MA250 for >=80 days sell SP500 and go to treasuries; reenter on >=5 above.
+if exit_250:
+    instr2 = "SP500: Sell SP500 → move to Treasuries"
+elif reentry_250:
+    instr2 = "SP500: Buy/hold SP500 (reentry condition met)"
+else:
+    instr2 = "SP500: No action"
 
-if __name__ == "__main__":
-    main()
+lines.append("<b>What to do today (SP500):</b>")
+lines.append(instr2)
+
+# Then keep your existing send_telegram call:
+# send_telegram(bot_token, chat_id, "\n".join(lines))
