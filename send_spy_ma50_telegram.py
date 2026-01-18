@@ -149,7 +149,7 @@ def main() -> None:
         un_now = float(current["UNRATE"])
         un_prior = float(prior["UNRATE"])
         un_chg = un_now - un_prior
-        un_flag = (un_chg > 0. қилип)
+        un_flag = (un_chg > 0.3)
 
         un_now_date = current["DATE"].date().isoformat()
         un_prior_date = prior["DATE"].date().isoformat()
