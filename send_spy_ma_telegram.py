@@ -1,189 +1,263 @@
+#!/usr/bin/env python3
+"""
+Daily SPY SMA Telegram reporter.
+
+Requirements:
+  pip install pandas requests python-dateutil
+
+Usage:
+  Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in environment (GitHub Actions secrets).
+  Optionally set:
+    SPY_SOURCE            - URL or local CSV path for SPY daily data (default: Stooq CSV)
+    UNRATE_SOURCE         - URL or local CSV path for UNRATE (default: None -> skip UNRATE)
+    DEBUG                 - if "1", prints debug info to stdout
+"""
+
+from __future__ import annotations
 import os
+import sys
+import io
+from datetime import datetime, timedelta
+from dateutil import parser as dateparser
+
 import pandas as pd
 import requests
 
-# ============================
-# Data sources
-# ============================
+# ---------- Configuration defaults ----------
+DEFAULT_SPY_URL = "https://stooq.com/q/d/l/?s=spy.us&i=d"
+# Optionally provide UNRATE CSV URL/path via env var UNRATE_SOURCE
+# FRED CSVs often have a DATE or observation_date column and a numeric column.
+# Example FRED file: https.../UNRATE.csv
+# If UNRATE_SOURCE is not provided, UNRATE is skipped.
+# --------------------------------------------
 
-STOOQ_CSV_URL = "https://stooq.com/q/d/l/?s=spy.us&i=d"
-FRED_UNRATE_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE"
+def _read_csv_flex(path_or_url: str) -> pd.DataFrame:
+    """Read CSV from URL or local path robustly."""
+    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+        r = requests.get(path_or_url, timeout=30)
+        r.raise_for_status()
+        s = io.StringIO(r.text)
+        return pd.read_csv(s)
+    return pd.read_csv(path_or_url)
 
-ACCOUNT_LABEL = "ROTH"
+def _find_price_col(df: pd.DataFrame) -> str | None:
+    candidates = [c for c in df.columns if c.lower() in ("close", "adj close", "adjusted close", "price", "spy", "close*")]
+    if candidates:
+        return candidates[0]
+    numeric_cols = df.select_dtypes("number").columns.tolist()
+    if len(numeric_cols) == 1:
+        return numeric_cols[0]
+    # fallback: try common names
+    for alt in ("Close", "close", "PRICE"):
+        if alt in df.columns:
+            return alt
+    return None
 
+def _ensure_date_index(df: pd.DataFrame, date_cols_possible=None) -> pd.DataFrame:
+    """Ensure df indexed by datetime and sorted ascending."""
+    if date_cols_possible is None:
+        date_cols_possible = ["Date", "date", "DATE", "DATE_TIME", "timestamp"]
+    # If already has DatetimeIndex, keep it
+    if isinstance(df.index, pd.DatetimeIndex):
+        df = df.sort_index()
+        return df
+    # Try to find a date column
+    for c in date_cols_possible:
+        if c in df.columns:
+            df[c] = pd.to_datetime(df[c], errors="coerce")
+            df = df.set_index(c)
+            df = df.sort_index()
+            return df
+    # try to infer first column as date
+    first = df.columns[0]
+    try:
+        parsed = pd.to_datetime(df[first], errors="coerce")
+        if parsed.notna().sum() > 0:
+            df = df.set_index(parsed)
+            df.index.name = None
+            df = df.sort_index()
+            return df
+    except Exception:
+        pass
+    raise RuntimeError(f"Unable to find/parse a date column in CSV. Columns: {list(df.columns)}")
 
-# ============================
-# Helpers
-# ============================
-
-def fetch_spy_history() -> pd.DataFrame:
-    df = pd.read_csv(STOOQ_CSV_URL)
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date").set_index("Date")
-    return df[["Close"]].dropna()
-
-
-def fetch_unrate() -> pd.DataFrame:
-    """
-    Match the original/simple approach (direct FRED CSV parse), but keep one tiny
-    compatibility fix so it still works if FRED uses observation_date instead of DATE.
-    """
-    df = pd.read_csv(FRED_UNRATE_CSV_URL)
-
-    # Original expectation was columns: DATE, UNRATE
-    # Some FRED feeds use: observation_date, UNRATE
-    if "DATE" not in df.columns and "observation_date" in df.columns:
-        df = df.rename(columns={"observation_date": "DATE"})
-
-    # Keep original behavior: coerce types, drop missing, sort
-    df["DATE"] = pd.to_datetime(df["DATE"])
-    df["UNRATE"] = pd.to_numeric(df["UNRATE"], errors="coerce")
-    df = df.dropna().sort_values("DATE").reset_index(drop=True)
-    return df
-
-
-
-def count_streak(series: pd.Series) -> int:
-    c = 0
-    for v in reversed(series.tolist()):
-        if bool(v):
-            c += 1
+def _count_consecutive(series: pd.Series, predicate) -> int:
+    """Count consecutive matching predicate values at end of series."""
+    # predicate is function taking a value -> bool
+    cnt = 0
+    for val in reversed(series):
+        try:
+            ok = predicate(val)
+        except Exception:
+            ok = False
+        if ok:
+            cnt += 1
         else:
             break
-    return c
+    return cnt
 
+def _telegram_send(token: str, chat_id: str, text: str) -> None:
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    resp = requests.post(url, data={"chat_id": chat_id, "text": text})
+    resp.raise_for_status()
 
-def send_telegram(bot_token: str, chat_id: str, text: str):
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    requests.post(url, json=payload, timeout=30)
-
-
-# ============================
-# Main
-# ============================
+def format_money(x: float) -> str:
+    return f"{x:,.2f}"
 
 def main():
-    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    # ---- env / inputs ----
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+    SPY_SOURCE = os.getenv("SPY_SOURCE", DEFAULT_SPY_URL)
+    UNRATE_SOURCE = os.getenv("UNRATE_SOURCE", "")  # optional
+    DEBUG = os.getenv("DEBUG", "0") == "1"
 
-    # --- Load data ---
-    df = fetch_spy_history()
-    un = fetch_unrate()
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set in environment.")
 
+    # ---- load SPY data ----
+    df = _read_csv_flex(SPY_SOURCE)
+    df = _ensure_date_index(df)
+
+    # detect price column and standardize
+    price_col = _find_price_col(df)
+    if price_col is None:
+        raise RuntimeError(f"No price/close column found in SPY data. Columns: {list(df.columns)}")
+    if price_col != "Close":
+        df = df.rename(columns={price_col: "Close"})
+
+    # convert Close to numeric
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    df = df.dropna(subset=["Close"])
+    if df.empty:
+        raise RuntimeError("SPY data contains no valid Close values.")
+
+    # compute SMAs (inside main)
+    df["SMA50"] = df["Close"].rolling(window=50, min_periods=1).mean()
+    df["SMA250"] = df["Close"].rolling(window=250, min_periods=1).mean()
+
+    # ---- UNRATE (optional) ----
+    unrate_df = None
+    unrate_3mo_change = None
+    unrate_latest = None
+    if UNRATE_SOURCE:
+        try:
+            u = _read_csv_flex(UNRATE_SOURCE)
+            # find date col and rate column
+            date_candidates = [c for c in u.columns if "date" in c.lower() or c.lower() == "date"]
+            if date_candidates:
+                date_col = date_candidates[0]
+            else:
+                date_col = u.columns[0]
+            u[date_col] = pd.to_datetime(u[date_col], errors="coerce")
+            # find numeric column for rate
+            num_cols = u.select_dtypes("number").columns.tolist()
+            if len(num_cols) >= 1:
+                rate_col = num_cols[0]
+            else:
+                # try common name
+                rate_candidates = [c for c in u.columns if c.lower() in ("value", "unrate", "rate", "observed_value")]
+                rate_col = rate_candidates[0] if rate_candidates else None
+            if rate_col is None:
+                raise RuntimeError("UNRATE file has no numeric column for rate.")
+            u = u.set_index(date_col).sort_index()
+            u[rate_col] = pd.to_numeric(u[rate_col], errors="coerce")
+            unrate_df = u[[rate_col]].dropna()
+            # compute 3-month change using last available month
+            unrate_latest = float(unrate_df.iloc[-1, 0])
+            # find value roughly 3 months prior: get index - 90 days
+            cutoff = unrate_df.index[-1] - pd.DateOffset(months=3)
+            prior = unrate_df[unrate_df.index <= cutoff]
+            if not prior.empty:
+                prior_val = float(prior.iloc[-1, 0])
+                unrate_3mo_change = unrate_latest - prior_val
+            else:
+                # fallback: difference between last and first of file if short
+                unrate_3mo_change = unrate_latest - float(unrate_df.iloc[0, 0])
+        except Exception as e:
+            # non-fatal: keep unrate info as None
+            if DEBUG:
+                print("UNRATE load error:", e, file=sys.stderr)
+            unrate_df = None
+
+    # ---- get latest trading row ----
     latest = df.iloc[-1]
-    prev = df.iloc[:-1]
+    latest_date = latest.name if hasattr(latest, "name") else df.index[-1]
+    latest_close = float(latest["Close"])
 
-    latest_date = latest.name.strftime("%Y-%m-%d")
-    latest_close = latest["Close"]
+    # ---- Strategy computations ----
+    # Strategy 1: MA50 / Exit-20 / Reentry-5, UNRATE decision
+    series_sma50 = df["Close"] > df["SMA50"]
+    above_50 = bool(series_sma50.iloc[-1])
+    streak_above_50 = _count_consecutive(series_sma50.values, lambda v: bool(v))
+    streak_below_50 = _count_consecutive(series_sma50.values, lambda v: not bool(v))
+    exit_20 = streak_below_50 >= 20
+    reentry_5 = streak_above_50 >= 5
 
-    # ============================
-    # MA50_E20_R5  (TopK overlay)
-    # ============================
+    # Strategy 2: MA250 / Exit-80 / Reentry-5, treasuries only safe asset
+    series_sma250 = df["Close"] > df["SMA250"]
+    above_250 = bool(series_sma250.iloc[-1])
+    streak_above_250 = _count_consecutive(series_sma250.values, lambda v: bool(v))
+    streak_below_250 = _count_consecutive(series_sma250.values, lambda v: not bool(v))
+    exit_80 = streak_below_250 >= 80
+    reentry_5_250 = streak_above_250 >= 5
 
-    df["SMA50"] = df["Close"].rolling(50).mean()
+    # Decision for Strategy 1's safe asset when exit triggered:
+    # If UNRATE rising > 0.3 percentage points over 3 months -> Treasuries else SP500
+    strat1_safe = "SP500"
+    if exit_20:
+        if unrate_3mo_change is not None and unrate_3mo_change > 0.3:
+            strat1_safe = "Treasuries"
+        else:
+            strat1_safe = "SP500"
 
-    above_50 = latest_close > latest["SMA50"]
-    below_50 = latest_close < latest["SMA50"]
+    # Compose "what to do" texts
+    def action_text_ma50():
+        if exit_20:
+            return f"EXIT triggered (≥20 days below SMA50). Move to {strat1_safe}."
+        if reentry_5:
+            return "REENTRY triggered (≥5 days above SMA50). Re-enter SP500 exposure."
+        return "No action."
 
-    above_streak_50 = count_streak(prev["Close"] > prev["SMA50"])
-    below_streak_50 = count_streak(prev["Close"] < prev["SMA50"])
+    def action_text_ma250():
+        if exit_80:
+            return "EXIT triggered (≥80 days below SMA250). Move to Treasuries."
+        if reentry_5_250:
+            return "REENTRY triggered (≥5 days above SMA250). Re-enter SP500 exposure."
+        return "No action."
 
-    exit_50 = below_streak_50 >= 20
-    reentry_50 = above_streak_50 >= 5
-
-    # UNRATE logic
-    un_now = un.iloc[-1]
-    un_prior = un.iloc[-4] if len(un) >= 4 else None
-
-    un_now_date = un_now["DATE"].strftime("%Y-%m-%d")
-    un_prior_date = un_prior["DATE"].strftime("%Y-%m-%d") if un_prior is not None else "N/A"
-
-    un_chg = un_now["UNRATE"] - un_prior["UNRATE"] if un_prior is not None else 0.0
-    un_flag = un_chg > 0.3
-
-    # ============================
-    # MA250_E80_R5 (SP500 holdings)
-    # ============================
-
-    df["SMA250"] = df["Close"].rolling(250).mean()
-
-    above_250 = latest_close > latest["SMA250"]
-    below_250 = latest_close < latest["SMA250"]
-
-    above_streak_250 = count_streak(prev["Close"] > prev["SMA250"])
-    below_streak_250 = count_streak(prev["Close"] < prev["SMA250"])
-
-    exit_250 = below_streak_250 >= 80
-    reentry_250 = above_streak_250 >= 5
-
-    # ============================
-    # Telegram message
-    # ============================
-
+    # ---- Build message ----
     lines = []
-
-    lines.append(f"<b>{ACCOUNT_LABEL} ACCOUNT</b>")
-    lines.append("")
-    lines.append(f"SPY Price as-of (trading day): {latest_date}")
-    lines.append(f"Close: {latest_close:.2f}")
+    lines.append("ROTH ACCOUNT")
+    lines.append(f"SPY {format_money(latest_close)}  {pd.to_datetime(latest_date).strftime('%Y-%m-%d')}")
     lines.append("")
 
-    # --- MA50 block ---
-    lines.append("<b>MA50_E20_R5:</b>")
-    lines.append(f"SMA50: {latest['SMA50']:.2f}")
-    lines.append(f"SMA50 Status: <b>{'ABOVE' if above_50 else 'BELOW'}</b>")
-    lines.append(f"SMA50 Above streak: {above_streak_50}")
-    lines.append(f"SMA50 Below streak: {below_streak_50}")
-    lines.append("")
-    lines.append(f"Exit trigger (≥20 below): {'YES' if exit_50 else 'NO'}")
-    lines.append(f"Reentry trigger (≥5 above): {'YES' if reentry_50 else 'NO'}")
-    lines.append("")
-    lines.append("UNRATE (FRED, monthly; no lag)")
-    lines.append(f"UNRATE as-of date: {un_now_date} → {un_now['UNRATE']:.1f}%")
-    lines.append(f"UNRATE 3-mo prior: {un_prior_date} → {un_prior['UNRATE']:.1f}%")
-    lines.append(f"UNRATE 3-mo change: {un_chg:.2f} pp")
-    lines.append(f"UNRATE rising flag (>0.3): <b>{'ON' if un_flag else 'OFF'}</b>")
+    # MA50 block
+    lines.append("MA50_E20_R5 (Top-K)")
+    lines.append(f"  SMA50 = {format_money(float(latest['SMA50']))}")
+    lines.append(f"  Status: {'ABOVE' if above_50 else 'BELOW'} SMA50")
+    lines.append(f"  Above streak: {streak_above_50} days; Below streak: {streak_below_50} days")
+    if unrate_latest is not None:
+        lines.append(f"  UNRATE = {unrate_latest:.2f}%; 3-mo Δ = {unrate_3mo_change:+.2f} pp")
+        lines.append(f"  UNRATE rising > 0.3 pp? {'YES' if (unrate_3mo_change is not None and unrate_3mo_change>0.3) else 'NO'}")
+    lines.append(f"  What to do today: {action_text_ma50()}")
     lines.append("")
 
-    if exit_50:
-        instr1 = "Exit Top-K equities → Treasuries" if un_flag else "Rotate Top-K → SP500"
-    else:
-        instr1 = "Remain invested in Top-K equities"
-
-    lines.append("<b>What to do today (Top-K):</b>")
-    lines.append(instr1)
-    lines.append("")
+    # MA250 block
+    lines.append("MA250_E80_R5 (SP500)")
+    lines.append(f"  SMA250 = {format_money(float(latest['SMA250']))}")
+    lines.append(f"  Status: {'ABOVE' if above_250 else 'BELOW'} SMA250")
+    lines.append(f"  Above streak: {streak_above_250} days; Below streak: {streak_below_250} days")
+    lines.append(f"  What to do today: {action_text_ma250()}")
     lines.append("")
 
-    # --- MA250 block ---
-    lines.append("<b>MA250_E80_R5:</b>")
-    lines.append(f"SMA250: {latest['SMA250']:.2f}")
-    lines.append(f"SMA250 Status: <b>{'ABOVE' if above_250 else 'BELOW'}</b>")
-    lines.append(f"SMA250 Above streak: {above_streak_250}")
-    lines.append(f"SMA250 Below streak: {below_streak_250}")
-    lines.append("")
-    lines.append(f"Exit trigger (≥80 below): {'YES' if exit_250 else 'NO'}")
-    lines.append(f"Reentry trigger (≥5 above): {'YES' if reentry_250 else 'NO'}")
-    lines.append("")
+    message = "\n".join(lines)
 
-    if exit_250:
-        instr2 = "Sell SP500 → move to Treasuries"
-    elif reentry_250:
-        instr2 = "Hold / reenter SP500"
-    else:
-        instr2 = "No action on SP500 holdings"
+    if DEBUG:
+        print("DEBUG: message:\n", message, file=sys.stderr)
 
-    lines.append("<b>What to do today (SP500):</b>")
-    lines.append(instr2)
-
-    send_telegram(bot_token, chat_id, "\n".join(lines))
-
+    # ---- send Telegram ----
+    _telegram_send(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, message)
 
 if __name__ == "__main__":
     main()
