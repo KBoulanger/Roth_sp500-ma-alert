@@ -24,10 +24,23 @@ def fetch_spy_history() -> pd.DataFrame:
 
 
 def fetch_unrate() -> pd.DataFrame:
+    """
+    Match the original/simple approach (direct FRED CSV parse), but keep one tiny
+    compatibility fix so it still works if FRED uses observation_date instead of DATE.
+    """
     df = pd.read_csv(FRED_UNRATE_CSV_URL)
+
+    # Original expectation was columns: DATE, UNRATE
+    # Some FRED feeds use: observation_date, UNRATE
+    if "DATE" not in df.columns and "observation_date" in df.columns:
+        df = df.rename(columns={"observation_date": "DATE"})
+
+    # Keep original behavior: coerce types, drop missing, sort
     df["DATE"] = pd.to_datetime(df["DATE"])
     df["UNRATE"] = pd.to_numeric(df["UNRATE"], errors="coerce")
-    return df.dropna()
+    df = df.dropna().sort_values("DATE").reset_index(drop=True)
+    return df
+
 
 
 def count_streak(series: pd.Series) -> int:
