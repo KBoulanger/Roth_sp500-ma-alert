@@ -11,7 +11,7 @@ STOOQ_CSV_URL = "https://stooq.com/q/d/l/?s=spy.us&i=d"
 # FRED API endpoint for UNRATE (more reliable than CSV export)
 FRED_API_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
-ACCOUNT_LABEL = "ROTH ACCOUNT"
+ACCOUNT_LABEL = "PORTFOLIO MONITOR"
 
 
 # ============================
@@ -102,7 +102,7 @@ def count_streak(series: pd.Series) -> int:
     return c
 
 
-def find_exit_and_recovery(below_series: pd.Series, exit_threshold: int) -> dict:
+def find_exit_and_recovery(below_series: pd.Series, exit_threshold: int, reentry_threshold: int = 5) -> dict:
     """
     Scan history to determine if we triggered an exit and whether we've recovered.
 
@@ -110,6 +110,7 @@ def find_exit_and_recovery(below_series: pd.Series, exit_threshold: int) -> dict
     - exited: True if an exit was triggered and we haven't fully re-entered
     - exit_day: date when exit was triggered (if applicable)
     - days_above_since_exit: consecutive days above MA since last being below
+    - reentry_threshold: days above needed to re-enter (for display)
     """
     values = below_series.tolist()
     dates = below_series.index.tolist()
@@ -131,16 +132,18 @@ def find_exit_and_recovery(below_series: pd.Series, exit_threshold: int) -> dict
             "exited": below_streak >= exit_threshold,
             "exit_day": None,
             "days_above_since_exit": 0,
-            "recovering": False
+            "recovering": False,
+            "reentry_threshold": reentry_threshold
         }
 
     # We're above now. Look back before this "above" period to see if there was an exit.
     # Start from where the current above streak began
     idx_start_of_above = len(values) - days_above
 
-    # Now scan backwards from there to find if there was a 20+ day below streak
+    # Now scan backwards from there to find if there was an exit-triggering below streak
     if idx_start_of_above <= 0:
-        return {"exited": False, "exit_day": None, "days_above_since_exit": days_above, "recovering": False}
+        return {"exited": False, "exit_day": None, "days_above_since_exit": days_above, 
+                "recovering": False, "reentry_threshold": reentry_threshold}
 
     # Count the below streak that ended right before current above streak
     below_streak_before = 0
@@ -152,16 +155,18 @@ def find_exit_and_recovery(below_series: pd.Series, exit_threshold: int) -> dict
 
     # Did that below streak trigger an exit?
     if below_streak_before >= exit_threshold:
-        # Yes - we exited. Are we recovered (5+ days above)?
+        # Yes - we exited. Are we recovered (reentry_threshold+ days above)?
         return {
             "exited": True,
             "exit_day": dates[idx_start_of_above - 1] if idx_start_of_above > 0 else None,
             "days_above_since_exit": days_above,
-            "recovering": days_above < 5  # Still recovering if < 5 days above
+            "recovering": days_above < reentry_threshold,
+            "reentry_threshold": reentry_threshold
         }
 
     # No exit was triggered
-    return {"exited": False, "exit_day": None, "days_above_since_exit": days_above, "recovering": False}
+    return {"exited": False, "exit_day": None, "days_above_since_exit": days_above, 
+            "recovering": False, "reentry_threshold": reentry_threshold}
 
 
 def send_telegram(bot_token: str, chat_id: str, text: str):
@@ -192,135 +197,154 @@ def main():
     latest_close = latest["Close"]
 
     # ============================
-    # MA50_E20_R5 (Top-5 Strategy)
+    # Calculate Moving Averages
     # ============================
-
+    
     df["SMA50"] = df["Close"].rolling(50).mean()
+    df["SMA250"] = df["Close"].rolling(250).mean()
+    
     sma50_value = df["SMA50"].iloc[-1]
+    sma250_value = df["SMA250"].iloc[-1]
 
-    # Current status
-    above_50 = latest_close >= sma50_value
-    below_50 = latest_close < sma50_value
-
-    # Calculate streaks (using all data including today)
+    # Calculate above/below series
     df["above_sma50"] = df["Close"] >= df["SMA50"]
     df["below_sma50"] = df["Close"] < df["SMA50"]
+    df["above_sma250"] = df["Close"] >= df["SMA250"]
+    df["below_sma250"] = df["Close"] < df["SMA250"]
 
-    above_streak_50 = count_streak(df["above_sma50"])
+    # Current streaks
     below_streak_50 = count_streak(df["below_sma50"])
+    below_streak_250 = count_streak(df["below_sma250"])
 
-    # Triggers - use historical analysis
-    state_50 = find_exit_and_recovery(df["below_sma50"], exit_threshold=20)
-    exited_50 = state_50["exited"] or state_50["recovering"]
-    reentry_50 = state_50["exited"] and state_50["days_above_since_exit"] >= 5
-
+    # ============================
     # UNRATE logic (3-month comparison)
+    # ============================
+    
     un_now = un.iloc[-1]
-    # 3 months prior = 3 rows back in monthly data
     un_prior = un.iloc[-4] if len(un) >= 4 else un.iloc[0]
 
-    un_now_date = un_now["DATE"].strftime("%Y-%m-%d")
     un_now_rate = un_now["UNRATE"]
-    un_prior_date = un_prior["DATE"].strftime("%Y-%m-%d")
     un_prior_rate = un_prior["UNRATE"]
     un_chg = un_now_rate - un_prior_rate
     un_flag = un_chg > 0.3
 
     # ============================
-    # MA250_E80_R5 (SP500 holdings)
+    # ROTH: MA50_E20_R5 (Top-5 Strategy)
     # ============================
 
-    df["SMA250"] = df["Close"].rolling(250).mean()
-    sma250_value = df["SMA250"].iloc[-1]
+    state_roth = find_exit_and_recovery(df["below_sma50"], exit_threshold=20, reentry_threshold=5)
+    exited_roth = state_roth["exited"] or state_roth["recovering"]
+    reentry_roth = state_roth["exited"] and state_roth["days_above_since_exit"] >= 5
 
-    above_250 = latest_close >= sma250_value
-    below_250 = latest_close < sma250_value
-
-    df["above_sma250"] = df["Close"] >= df["SMA250"]
-    df["below_sma250"] = df["Close"] < df["SMA250"]
-
-    above_streak_250 = count_streak(df["above_sma250"])
-    below_streak_250 = count_streak(df["below_sma250"])
-
-    # Triggers - use historical analysis
-    state_250 = find_exit_and_recovery(df["below_sma250"], exit_threshold=80)
-    exited_250 = state_250["exited"] or state_250["recovering"]
-    reentry_250 = state_250["exited"] and state_250["days_above_since_exit"] >= 5
-
-    # ============================
-    # Determine current position status for each strategy
-    # ============================
-
-    # Top-5 position logic:
-    # - If we exited (20+ days below) and haven't re-entered (5+ days above): defensive
-    # - If we re-entered (5+ days above after exit): back in Top-5
-    # - If never exited: Top-5
-    if exited_50 and not reentry_50:
-        # Still out - in defensive position
+    if exited_roth and not reentry_roth:
         if un_flag:
-            top5_position = "TREASURIES"
+            roth_position = "TREASURIES"
         else:
-            top5_position = "SP500"
-        top5_status = "EXITED"
+            roth_position = "SP500"
+        roth_status = "EXITED"
     else:
-        top5_position = "TOP-5 STOCKS"
-        top5_status = "INVESTED"
-
-    # SP500 holdings position
-    if exited_250 and not reentry_250:
-        sp500_position = "TREASURIES"
-        sp500_status = "EXITED"
-    else:
-        sp500_position = "SP500"
-        sp500_status = "INVESTED"
+        roth_position = "TOP-5 STOCKS"
+        roth_status = "INVESTED"
 
     # ============================
-    # Build Telegram message (simplified)
+    # ROTH: MA250_E80_R5 (SP500 holdings in Roth)
+    # ============================
+
+    state_roth_sp500 = find_exit_and_recovery(df["below_sma250"], exit_threshold=80, reentry_threshold=5)
+    exited_roth_sp500 = state_roth_sp500["exited"] or state_roth_sp500["recovering"]
+    reentry_roth_sp500 = state_roth_sp500["exited"] and state_roth_sp500["days_above_since_exit"] >= 5
+
+    if exited_roth_sp500 and not reentry_roth_sp500:
+        roth_sp500_position = "TREASURIES"
+        roth_sp500_status = "EXITED"
+    else:
+        roth_sp500_position = "SP500"
+        roth_sp500_status = "INVESTED"
+
+    # ============================
+    # BROKERAGE: MA250_E90_R5 (Taxable account - optimized for tax efficiency)
+    # ============================
+
+    state_brokerage = find_exit_and_recovery(df["below_sma250"], exit_threshold=90, reentry_threshold=5)
+    exited_brokerage = state_brokerage["exited"] or state_brokerage["recovering"]
+    reentry_brokerage = state_brokerage["exited"] and state_brokerage["days_above_since_exit"] >= 5
+
+    if exited_brokerage and not reentry_brokerage:
+        brokerage_position = "TREASURIES"
+        brokerage_status = "EXITED"
+    else:
+        brokerage_position = "TOP-5 STOCKS"
+        brokerage_status = "INVESTED"
+
+    # ============================
+    # Build Telegram message
     # ============================
 
     lines = []
 
     # Header
-    lines.append(f"<b>{ACCOUNT_LABEL}</b>")
+    lines.append(f"<b>📊 {ACCOUNT_LABEL}</b>")
     lines.append(f"{latest_date} | SPY: {latest_close:.2f}")
+    lines.append(f"SMA50: {sma50_value:.2f} | SMA250: {sma250_value:.2f}")
     lines.append("")
 
-    # --- Top-5 Strategy ---
-    lines.append(f"<b>Top-5 Strategy</b>")
-    lines.append(f"➤ <b>HOLD: {top5_position}</b>")
-    lines.append(f"SMA50: {sma50_value:.2f}")
-    lines.append(f"SPY vs SMA50: {'ABOVE' if above_50 else 'BELOW'}")
+    # --- ROTH ACCOUNT SECTION ---
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<b>🏦 ROTH IRA</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
 
-    if top5_status == "INVESTED":
-        # Show progress toward exit - add warning emoji if any days below
+    # Top-5 Strategy (MA50_E20_R5)
+    lines.append(f"<b>Top-5 Strategy</b> <i>(MA50 E20 R5)</i>")
+    lines.append(f"➤ <b>HOLD: {roth_position}</b>")
+
+    if roth_status == "INVESTED":
         if below_streak_50 > 0:
-            lines.append(f"Exit watch: {below_streak_50}/20 days below ⚠️")
+            lines.append(f"Exit watch: {below_streak_50}/20 days below SMA50 ⚠️")
         else:
-            lines.append(f"Exit watch: {below_streak_50}/20 days below")
+            lines.append(f"Exit watch: {below_streak_50}/20 days below SMA50")
     else:
-        # Show progress toward re-entry
-        days_above = state_50["days_above_since_exit"]
-        lines.append(f"Re-entry watch: {days_above}/5 days above ⏳")
+        days_above = state_roth["days_above_since_exit"]
+        lines.append(f"Re-entry watch: {days_above}/5 days above SMA50 ⏳")
 
     lines.append(f"UNRATE 3-mo Δ: {un_chg:+.2f}pp ({'rising ⚠️' if un_flag else 'stable'})")
     lines.append("")
 
-    # --- SP500 Holdings ---
-    lines.append(f"<b>SP500 Holdings</b>")
-    lines.append(f"➤ <b>HOLD: {sp500_position}</b>")
-    lines.append(f"SMA250: {sma250_value:.2f}")
-    lines.append(f"SPY vs SMA250: {'ABOVE' if above_250 else 'BELOW'}")
+    # SP500 Holdings (MA250_E80_R5)
+    lines.append(f"<b>SP500 Holdings</b> <i>(MA250 E80 R5)</i>")
+    lines.append(f"➤ <b>HOLD: {roth_sp500_position}</b>")
 
-    if sp500_status == "INVESTED":
-        # Show progress toward exit - add warning emoji if any days below
+    if roth_sp500_status == "INVESTED":
         if below_streak_250 > 0:
-            lines.append(f"Exit watch: {below_streak_250}/80 days below ⚠️")
+            lines.append(f"Exit watch: {below_streak_250}/80 days below SMA250 ⚠️")
         else:
-            lines.append(f"Exit watch: {below_streak_250}/80 days below")
+            lines.append(f"Exit watch: {below_streak_250}/80 days below SMA250")
     else:
-        # Show progress toward re-entry
-        days_above = state_250["days_above_since_exit"]
-        lines.append(f"Re-entry watch: {days_above}/5 days above ⏳")
+        days_above = state_roth_sp500["days_above_since_exit"]
+        lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
+
+    lines.append("")
+
+    # --- BROKERAGE ACCOUNT SECTION ---
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("<b>💼 BROKERAGE</b>")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    # Brokerage Top-5 (MA250_E90_R5)
+    lines.append(f"<b>Top-5 Strategy</b> <i>(MA250 E90 R5)</i>")
+    lines.append(f"➤ <b>HOLD: {brokerage_position}</b>")
+
+    if brokerage_status == "INVESTED":
+        if below_streak_250 > 0:
+            lines.append(f"Exit watch: {below_streak_250}/90 days below SMA250 ⚠️")
+        else:
+            lines.append(f"Exit watch: {below_streak_250}/90 days below SMA250")
+    else:
+        days_above = state_brokerage["days_above_since_exit"]
+        lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
+
+    lines.append(f"UNRATE 3-mo Δ: {un_chg:+.2f}pp ({'rising ⚠️' if un_flag else 'stable'})")
 
     send_telegram(bot_token, chat_id, "\n".join(lines))
 
