@@ -289,9 +289,9 @@ def main():
     lines.append("")
 
     # --- ROTH ACCOUNT SECTION ---
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("<b>🏦 ROTH IRA</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
     # Top-5 Strategy (MA50_E20_R5)
@@ -326,9 +326,9 @@ def main():
     lines.append("")
 
     # --- BROKERAGE ACCOUNT SECTION ---
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("<b>💼 BROKERAGE</b>")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("")
 
     # Brokerage Top-5 (MA250_E90_R5)
