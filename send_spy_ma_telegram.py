@@ -142,7 +142,7 @@ def find_exit_and_recovery(below_series: pd.Series, exit_threshold: int, reentry
 
     # Now scan backwards from there to find if there was an exit-triggering below streak
     if idx_start_of_above <= 0:
-        return {"exited": False, "exit_day": None, "days_above_since_exit": days_above, 
+        return {"exited": False, "exit_day": None, "days_above_since_exit": days_above,
                 "recovering": False, "reentry_threshold": reentry_threshold}
 
     # Count the below streak that ended right before current above streak
@@ -165,7 +165,7 @@ def find_exit_and_recovery(below_series: pd.Series, exit_threshold: int, reentry
         }
 
     # No exit was triggered
-    return {"exited": False, "exit_day": None, "days_above_since_exit": days_above, 
+    return {"exited": False, "exit_day": None, "days_above_since_exit": days_above,
             "recovering": False, "reentry_threshold": reentry_threshold}
 
 
@@ -199,10 +199,10 @@ def main():
     # ============================
     # Calculate Moving Averages
     # ============================
-    
+
     df["SMA50"] = df["Close"].rolling(50).mean()
     df["SMA250"] = df["Close"].rolling(250).mean()
-    
+
     sma50_value = df["SMA50"].iloc[-1]
     sma250_value = df["SMA250"].iloc[-1]
 
@@ -219,7 +219,7 @@ def main():
     # ============================
     # UNRATE logic (3-month comparison)
     # ============================
-    
+
     un_now = un.iloc[-1]
     un_prior = un.iloc[-4] if len(un) >= 4 else un.iloc[0]
 
@@ -262,19 +262,34 @@ def main():
         roth_sp500_status = "INVESTED"
 
     # ============================
-    # BROKERAGE: MA250_E90_R5 (Taxable account - optimized for tax efficiency)
+    # BROKERAGE: MA250_E90_R5 (Top-5 - Taxable account - optimized for tax efficiency)
     # ============================
 
-    state_brokerage = find_exit_and_recovery(df["below_sma250"], exit_threshold=90, reentry_threshold=5)
-    exited_brokerage = state_brokerage["exited"] or state_brokerage["recovering"]
-    reentry_brokerage = state_brokerage["exited"] and state_brokerage["days_above_since_exit"] >= 5
+    state_brokerage_top5 = find_exit_and_recovery(df["below_sma250"], exit_threshold=90, reentry_threshold=5)
+    exited_brokerage_top5 = state_brokerage_top5["exited"] or state_brokerage_top5["recovering"]
+    reentry_brokerage_top5 = state_brokerage_top5["exited"] and state_brokerage_top5["days_above_since_exit"] >= 5
 
-    if exited_brokerage and not reentry_brokerage:
-        brokerage_position = "TREASURIES"
-        brokerage_status = "EXITED"
+    if exited_brokerage_top5 and not reentry_brokerage_top5:
+        brokerage_top5_position = "TREASURIES"
+        brokerage_top5_status = "EXITED"
     else:
-        brokerage_position = "TOP-5 STOCKS"
-        brokerage_status = "INVESTED"
+        brokerage_top5_position = "TOP-5 STOCKS"
+        brokerage_top5_status = "INVESTED"
+
+    # ============================
+    # BROKERAGE: MA250_E80_R5 (SP500 holdings - Taxable account)
+    # ============================
+
+    state_brokerage_sp500 = find_exit_and_recovery(df["below_sma250"], exit_threshold=80, reentry_threshold=5)
+    exited_brokerage_sp500 = state_brokerage_sp500["exited"] or state_brokerage_sp500["recovering"]
+    reentry_brokerage_sp500 = state_brokerage_sp500["exited"] and state_brokerage_sp500["days_above_since_exit"] >= 5
+
+    if exited_brokerage_sp500 and not reentry_brokerage_sp500:
+        brokerage_sp500_position = "TREASURIES"
+        brokerage_sp500_status = "EXITED"
+    else:
+        brokerage_sp500_position = "SP500"
+        brokerage_sp500_status = "INVESTED"
 
     # ============================
     # Build Telegram message
@@ -295,7 +310,7 @@ def main():
     lines.append("")
 
     # Top-5 Strategy (MA50_E20_R5)
-    lines.append(f"Top-5 Strategy</b> <i>(MA50 E20 R5)</i>")
+    lines.append(f"<b>Top-5 Strategy</b> <i>(MA50 E20 R5)</i>")
     lines.append(f"➤ <b>HOLD: {roth_position}</b>")
 
     if roth_status == "INVESTED":
@@ -332,19 +347,33 @@ def main():
     lines.append("")
 
     # Brokerage Top-5 (MA250_E90_R5)
-    lines.append(f"Top-5 Strategy</b> <i>(MA250 E90 R5)</i>")
-    lines.append(f"➤ <b>HOLD: {brokerage_position}</b>")
+    lines.append(f"<b>Top-5 Strategy</b> <i>(MA250 E90 R5)</i>")
+    lines.append(f"➤ <b>HOLD: {brokerage_top5_position}</b>")
 
-    if brokerage_status == "INVESTED":
+    if brokerage_top5_status == "INVESTED":
         if below_streak_250 > 0:
             lines.append(f"Exit watch: {below_streak_250}/90 days below SMA250 ⚠️")
         else:
             lines.append(f"Exit watch: {below_streak_250}/90 days below SMA250")
     else:
-        days_above = state_brokerage["days_above_since_exit"]
+        days_above = state_brokerage_top5["days_above_since_exit"]
         lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
 
     lines.append(f"UNRATE 3-mo Δ: {un_chg:+.2f}pp ({'rising ⚠️' if un_flag else 'stable'})")
+    lines.append("")
+
+    # Brokerage SP500 Holdings (MA250_E80_R5)
+    lines.append(f"<b>SP500 Strategy</b> <i>(MA250 E80 R5)</i>")
+    lines.append(f"➤ <b>HOLD: {brokerage_sp500_position}</b>")
+
+    if brokerage_sp500_status == "INVESTED":
+        if below_streak_250 > 0:
+            lines.append(f"Exit watch: {below_streak_250}/80 days below SMA250 ⚠️")
+        else:
+            lines.append(f"Exit watch: {below_streak_250}/80 days below SMA250")
+    else:
+        days_above = state_brokerage_sp500["days_above_since_exit"]
+        lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
 
     send_telegram(bot_token, chat_id, "\n".join(lines))
 
