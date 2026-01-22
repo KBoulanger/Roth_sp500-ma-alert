@@ -295,7 +295,7 @@ def main():
     lines.append("")
 
     # Top-5 Strategy (MA50_E20_R5)
-    lines.append(f"<b>Top-5 Strategy</b> <i>(MA50 E20 R5)</i>")
+    lines.append(f"Top-5 Strategy</b> <i>(MA50 E20 R5)</i>")
     lines.append(f"➤ <b>HOLD: {roth_position}</b>")
 
     if roth_status == "INVESTED":
@@ -332,7 +332,7 @@ def main():
     lines.append("")
 
     # Brokerage Top-5 (MA250_E90_R5)
-    lines.append(f"<b>Top-5 Strategy</b> <i>(MA250 E90 R5)</i>")
+    lines.append(f"Top-5 Strategy</b> <i>(MA250 E90 R5)</i>")
     lines.append(f"➤ <b>HOLD: {brokerage_position}</b>")
 
     if brokerage_status == "INVESTED":
