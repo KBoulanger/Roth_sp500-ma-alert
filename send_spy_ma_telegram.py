@@ -286,9 +286,8 @@ def main():
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("<b>🏦 ROTH IRA</b>")
     lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append("")
 
-    lines.append(f"Top-5 Strategy <i>(MA50 E20 R5)</i>")
+    lines.append(f"<b>Top-5 Strategy</b> <i>(MA50 E20 R5)</i>")
     lines.append(f"➤ <b>HOLD: {roth_position}</b>")
 
     if roth_status == "INVESTED":
@@ -318,9 +317,8 @@ def main():
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("<b>💼 BROKERAGE</b>")
     lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append("")
 
-    lines.append(f"Top-5 Strategy <i>(MA250 E90 R5)</i>")
+    lines.append(f"<b>Top-5 Strategy</b> <i>(MA250 E90 R5)</i>")
     lines.append(f"➤ <b>HOLD: {brokerage_top5_position}</b>")
 
     if brokerage_top5_status == "INVESTED":
