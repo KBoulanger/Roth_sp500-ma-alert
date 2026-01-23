@@ -159,7 +159,9 @@ def send_telegram(bot_token: str, chat_id: str, text: str):
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
-    requests.post(url, json=payload, timeout=30)
+    resp = requests.post(url, json=payload, timeout=30)
+    resp.raise_for_status()  # ← This will raise an exception if the call fails
+    return resp.json()
 
 
 # ============================
