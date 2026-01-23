@@ -169,6 +169,14 @@ def send_telegram(bot_token: str, chat_id: str, text: str):
 # ============================
 
 def main():
+    # Auto-detect ET timezone and exit if not 4:05 PM ET
+    import pytz
+    et_tz = pytz.timezone('America/New_York')
+    current_et = datetime.now(et_tz)
+    if current_et.hour != 16 or current_et.minute < 5 or current_et.minute > 15:
+        print(f"Skipping - current ET time is {current_et.strftime('%I:%M %p')}, not 4:05-4:15 PM window")
+        return
+    
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
