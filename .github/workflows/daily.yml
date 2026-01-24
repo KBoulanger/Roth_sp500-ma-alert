@@ -25,4 +25,4 @@ jobs:
             TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
             TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
             FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-              MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}            
+            MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
