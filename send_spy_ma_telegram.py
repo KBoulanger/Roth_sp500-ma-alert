@@ -169,9 +169,9 @@ def send_telegram(bot_token: str, chat_id: str, text: str):
 # ============================
 
 def main():
-        # Check if this is a manual run (skip time check if so)
-        manual_run = os.environ.get("MANUAL_RUN", "").lower() == "true"
-        
+    # Check if this is a manual run (skip time check if so)
+    manual_run = os.environ.get("MANUAL_RUN", "").lower() == "true"
+
     # Auto-detect ET timezone and exit if not 4:05 PM ET
     import pytz
     et_tz = pytz.timezone('America/New_York')
