@@ -176,8 +176,9 @@ def main():
     import pytz
     et_tz = pytz.timezone('America/New_York')
     current_et = datetime.now(et_tz)
-    if not manual_run and not (15 <= current_et.hour <= 20):
-        print(f"Skipping - current ET time is {current_et.strftime('%I:%M %p')}, not within 3:00-8:59 PM window")
+    in_window = (current_et.hour == 16 and current_et.minute >= 5) or (17 <= current_et.hour <= 20)
+    if not manual_run and not in_window:
+        print(f"Skipping - current ET time is {current_et.strftime('%I:%M %p')}, not within 4:05-8:59 PM window")
         return
     
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
