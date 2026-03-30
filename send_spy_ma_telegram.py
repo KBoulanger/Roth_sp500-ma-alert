@@ -24,6 +24,10 @@ def fetch_spy_yfinance() -> pd.DataFrame:
     df = yf.download("SPY", period="2y", auto_adjust=True, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    # Normalize column names to title case in case yfinance changes casing
+    df.columns = [c.strip().title() for c in df.columns]
+    if "Close" not in df.columns:
+        raise ValueError(f"yfinance: 'Close' column not found. Got: {list(df.columns)}")
     df = df[["Close"]].dropna()
     if df.empty:
         raise ValueError("yfinance returned empty data")
@@ -32,9 +36,12 @@ def fetch_spy_yfinance() -> pd.DataFrame:
 
 def fetch_spy_stooq() -> pd.DataFrame:
     """Fallback source: Stooq CSV."""
-    df = pd.read_csv(STOOQ_CSV_URL)
-    if df.empty:
-        raise ValueError("Stooq returned empty data")
+    try:
+        df = pd.read_csv(STOOQ_CSV_URL)
+    except Exception as e:
+        raise ValueError(f"Stooq CSV read failed: {e}")
+    if df.empty or "Close" not in df.columns:
+        raise ValueError(f"Stooq returned unusable data. Columns: {list(df.columns) if not df.empty else 'empty'}")
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date").set_index("Date")
     return df[["Close"]].dropna()
@@ -47,7 +54,10 @@ def fetch_spy_history() -> pd.DataFrame:
     except Exception as e:
         print(f"yfinance failed: {e}, falling back to Stooq")
 
-    return fetch_spy_stooq()
+    try:
+        return fetch_spy_stooq()
+    except Exception as e:
+        raise RuntimeError(f"All SPY data sources failed. Last error: {e}")
 
 
 def fetch_unrate_fred_api(api_key: str) -> pd.DataFrame:
