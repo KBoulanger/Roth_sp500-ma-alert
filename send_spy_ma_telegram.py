@@ -18,11 +18,36 @@ ACCOUNT_LABEL = "PORTFOLIO MONITOR"
 # Helpers
 # ============================
 
-def fetch_spy_history() -> pd.DataFrame:
+def fetch_spy_yfinance() -> pd.DataFrame:
+    """Primary source: yfinance (Yahoo Finance)."""
+    import yfinance as yf
+    df = yf.download("SPY", period="2y", auto_adjust=True, progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df[["Close"]].dropna()
+    if df.empty:
+        raise ValueError("yfinance returned empty data")
+    return df
+
+
+def fetch_spy_stooq() -> pd.DataFrame:
+    """Fallback source: Stooq CSV."""
     df = pd.read_csv(STOOQ_CSV_URL)
+    if df.empty:
+        raise ValueError("Stooq returned empty data")
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date").set_index("Date")
     return df[["Close"]].dropna()
+
+
+def fetch_spy_history() -> pd.DataFrame:
+    """Try yfinance first, fall back to Stooq."""
+    try:
+        return fetch_spy_yfinance()
+    except Exception as e:
+        print(f"yfinance failed: {e}, falling back to Stooq")
+
+    return fetch_spy_stooq()
 
 
 def fetch_unrate_fred_api(api_key: str) -> pd.DataFrame:
