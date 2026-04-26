@@ -548,9 +548,9 @@ def main():
         vol_warn = "⚠️" if roth_state["vol_streak"] > 0 else ""
         ma_warn = "⚠️" if roth_state["ma_streak"] > 0 else ""
         lines.append(f"Vol exit watch: {roth_state['vol_streak']}/{ROTH_PARAMS['E_vol']} days NDX vol30 ≥ {int(ROTH_PARAMS['vol_thr']*100)}% {vol_warn}")
-        lines.append(f"MA exit watch:  {roth_state['ma_streak']}/{ROTH_PARAMS['E_ma']} days SPY < SMA{ROTH_PARAMS['ma_exit']} {ma_warn}")
+        lines.append(f"MA exit watch:  {roth_state['ma_streak']}/{ROTH_PARAMS['E_ma']} days SPY below SMA{ROTH_PARAMS['ma_exit']} {ma_warn}")
     else:
-        lines.append(f"Reentry watch: {roth_state['reentry_streak']}/{ROTH_PARAMS['R_re']} days SPY > SMA{ROTH_PARAMS['ma_re']} ⏳")
+        lines.append(f"Reentry watch: {roth_state['reentry_streak']}/{ROTH_PARAMS['R_re']} days SPY above SMA{ROTH_PARAMS['ma_re']} ⏳")
         if roth_state["last_transition_date"] is not None:
             tdate = roth_state["last_transition_date"].strftime("%Y-%m-%d")
             lines.append(f"<i>Exited {tdate} via {roth_state['last_transition_reason']}</i>")
@@ -579,9 +579,9 @@ def main():
         vol_warn = "⚠️" if brok_state["vol_streak"] > 0 else ""
         ma_warn = "⚠️" if brok_state["ma_streak"] > 0 else ""
         lines.append(f"Vol exit watch: {brok_state['vol_streak']}/{BROK_PARAMS['E_vol']} days NDX vol30 ≥ {int(BROK_PARAMS['vol_thr']*100)}% {vol_warn}")
-        lines.append(f"MA exit watch:  {brok_state['ma_streak']}/{BROK_PARAMS['E_ma']} days SPY < SMA{BROK_PARAMS['ma_exit']} {ma_warn}")
+        lines.append(f"MA exit watch:  {brok_state['ma_streak']}/{BROK_PARAMS['E_ma']} days SPY below SMA{BROK_PARAMS['ma_exit']} {ma_warn}")
     else:
-        lines.append(f"Reentry watch: {brok_state['reentry_streak']}/{BROK_PARAMS['R_re']} days SPY > SMA{BROK_PARAMS['ma_re']} ⏳")
+        lines.append(f"Reentry watch: {brok_state['reentry_streak']}/{BROK_PARAMS['R_re']} days SPY above SMA{BROK_PARAMS['ma_re']} ⏳")
         if brok_state["last_transition_date"] is not None:
             tdate = brok_state["last_transition_date"].strftime("%Y-%m-%d")
             lines.append(f"<i>Exited {tdate} via {brok_state['last_transition_reason']}</i>")
