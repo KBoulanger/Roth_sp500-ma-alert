@@ -511,39 +511,64 @@ def render_lev_section(label: str, params: dict, st: dict, fallback_first_date) 
 # Change-line builder
 # ============================
 
-def build_change_line(prev_state: dict, new_state: dict) -> str:
-    """Build the top-of-message status: 🚨 ACTION / ⚠️ APPROACHING / ⏳ WATCH / 📭 calm.
+def build_conditions_line(spy_close, sma275, spy_vol20,
+                           qqq_close, qqq_sma175, qqq_vol20,
+                           ndx_vol30, un_chg, un_flag_01, unrate_failed) -> str:
+    """One-line market conditions snapshot. Always shown under the status."""
+    bits = []
+    # SPY vs SMA275
+    if spy_close is not None and sma275 is not None:
+        pct = (spy_close - sma275) / sma275 * 100
+        v = f"{spy_vol20*100:.0f}%" if spy_vol20 is not None else "n/a"
+        bits.append(f"SPY {pct:+.1f}% vs SMA275 (vol20 {v})")
+    # QQQ vs SMA175
+    if qqq_close is not None and qqq_sma175 is not None:
+        pct = (qqq_close - qqq_sma175) / qqq_sma175 * 100
+        v = f"{qqq_vol20*100:.0f}%" if qqq_vol20 is not None else "n/a"
+        bits.append(f"QQQ {pct:+.1f}% vs SMA175 (vol20 {v})")
+    # NDX vol30
+    if ndx_vol30 is not None:
+        bits.append(f"NDX vol30 {ndx_vol30*100:.0f}%")
+    # UNRATE
+    if unrate_failed:
+        bits.append("UNRATE ⚠️ failed")
+    else:
+        bits.append(f"UNRATE Δ {un_chg:+.2f}pp ({'rising' if un_flag_01 else 'stable'})")
+    return "Conditions: " + " | ".join(bits)
 
-    new_state structure (per strategy key):
-      { "position": "<asset>",
-        "exit_streak": N, "exit_threshold": M,
-        "reentry_streak": N, "reentry_threshold": M,
-        "state": "invested"|"defensive",
-        "label": "Display Name",
-        "paths": [(name, streak, threshold), ...]   # optional, for Top-7 multi-path
-      }
+
+def build_summary_block(prev_state: dict, new_state: dict, conditions_line: str) -> list:
+    """Build a 2+ line summary block: status headline + conditions + (if non-calm) action items.
+
+    Returns a list of message lines (HTML formatted) ready to insert at top of message.
+
+    Status tiers:
+      🟢 ALL CLEAR — markets calm, all positions stable
+      🟡 WATCHING — exit/reentry counters progressing (none near threshold)
+      🟠 APPROACHING — one or more 1 day from flip
+      🔴 ACTION — flip(s) confirmed today, MOC order required tomorrow
     """
-    flips = []        # confirmed today: position changed
-    approaching = []  # one day from threshold (active counter == threshold - 1)
-    watching = []     # any non-zero active counter
+    flips = []
+    approaching = []
+    watching = []
 
     def categorize(label_text, streak, threshold, direction):
         if streak == 0 or threshold <= 0:
-            return  # calm
+            return
         if threshold > 1 and streak == threshold - 1:
             approaching.append((label_text, direction, streak, threshold))
         elif streak >= 1 and streak < threshold:
             watching.append((label_text, direction, streak, threshold))
 
+    n_total = 0
     for key, ns in new_state.items():
         if key.startswith("_"): continue
+        n_total += 1
         prev_pos = prev_state.get(key, {}).get("position")
         if prev_pos and prev_pos != ns["position"]:
             flips.append((ns["label"], prev_pos, ns["position"]))
             continue
-        # No flip — check approach status of active counter(s)
         if ns["state"] == "invested":
-            # If this strategy has multiple exit paths (Top-7 vol AND MA), surface each
             paths = ns.get("paths")
             if paths:
                 for path_name, streak, threshold in paths:
@@ -553,27 +578,52 @@ def build_change_line(prev_state: dict, new_state: dict) -> str:
         else:
             categorize(ns["label"], ns.get("reentry_streak", 0), ns.get("reentry_threshold", 1), "reentry")
 
+    lines = []
+
+    # ============ STATUS LINE ============
     if flips:
-        # Build SELL X / BUY Y action checklist
-        bits = [f"SELL {frm}, BUY {to}  ({lbl})" for lbl, frm, to in flips]
-        if len(flips) == 1:
-            return f"🚨 ACTION REQUIRED tomorrow at MOC (before 3:50pm ET): {bits[0]}."
-        joined = "\n  • ".join(bits)
-        return f"🚨 ACTION REQUIRED tomorrow at MOC (before 3:50pm ET) — {len(flips)} flips:\n  • {joined}"
+        n = len(flips)
+        lines.append(f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''} tomorrow at MOC (before 3:50pm ET)</b>")
+        lines.append(conditions_line)
+        if n == 1:
+            lbl, frm, to = flips[0]
+            lines.append(f"  • <b>SELL {frm}, BUY {to}</b>  ({lbl})")
+        else:
+            for lbl, frm, to in flips:
+                lines.append(f"  • <b>SELL {frm}, BUY {to}</b>  ({lbl})")
+        return lines
 
     if approaching:
-        bits = [f"{lbl} {direction} {s}/{t} (1 day from {direction})" for lbl, direction, s, t in approaching]
-        if len(approaching) == 1:
-            return f"⚠️ APPROACHING FLIP — {bits[0]}. All other strategies stable."
-        joined = "\n  • ".join(bits)
-        return f"⚠️ APPROACHING FLIP — {len(approaching)} signals near threshold:\n  • {joined}"
+        n = len(approaching)
+        if n == 1:
+            lbl, direction, s, t = approaching[0]
+            lines.append(f"<b>🟠 APPROACHING FLIP — {lbl} is 1 day from {direction}</b>")
+        else:
+            lines.append(f"<b>🟠 APPROACHING FLIP — {n} signals 1 day from threshold</b>")
+        lines.append(conditions_line)
+        for lbl, direction, s, t in approaching:
+            lines.append(f"  • {lbl} {direction} {s}/{t} ⚠️")
+        # Also show any items in WATCH state below approach
+        for lbl, direction, s, t in watching:
+            lines.append(f"  • {lbl} {direction} {s}/{t} ⏳")
+        return lines
 
     if watching:
-        bits = [f"{lbl} {direction} {s}/{t}" for lbl, direction, s, t in watching]
-        joined = "; ".join(bits)
-        return f"⏳ WATCH — {joined}. No flips."
+        n = len(watching)
+        if n == 1:
+            lbl, direction, s, t = watching[0]
+            lines.append(f"<b>🟡 WATCHING — {lbl} {direction} ticking ({s}/{t} days)</b>")
+        else:
+            lines.append(f"<b>🟡 WATCHING — {n} signals progressing (none near threshold)</b>")
+        lines.append(conditions_line)
+        for lbl, direction, s, t in watching:
+            lines.append(f"  • {lbl} {direction} {s}/{t} ⏳")
+        return lines
 
-    return "📭 No changes since previous run."
+    # ALL CLEAR
+    lines.append(f"<b>🟢 ALL CLEAR — {n_total} of {n_total} strategies stable, no signals progressing</b>")
+    lines.append(conditions_line)
+    return lines
 
 
 # ============================
@@ -795,10 +845,6 @@ def main():
         new_state["qqq_lev_brok"] = dict(new_state["qqq_lev_roth"])
         new_state["qqq_lev_brok"]["label"] = "QQQ Leveraged (Brok)"
 
-    # ============ Load prev state, compute change-line ============
-    prev = load_state()
-    change_line = build_change_line(prev, new_state)
-
     # ============ Build the Telegram message ============
     cur_vol_str = f"{vol30_v*100:.1f}%" if vol30_v is not None else "n/a"
     spy_vol_str = f"{spy_vol20_v*100:.1f}%" if spy_vol20_v is not None else "n/a"
@@ -818,12 +864,22 @@ def main():
     qqq_first_date = qqq_close.index[0] if qqq_close is not None else spy_first_date
     unrate_failed = not health["UNRATE"]
 
+    # Build top-of-message summary (status + conditions + active items)
+    prev = load_state()
+    conditions_line = build_conditions_line(
+        spy_close=latest_close, sma275=sma275_v, spy_vol20=spy_vol20_v,
+        qqq_close=qqq_close_v, qqq_sma175=qqq_sma175_v, qqq_vol20=qqq_vol20_v,
+        ndx_vol30=vol30_v, un_chg=un_chg, un_flag_01=un_flag_01,
+        unrate_failed=unrate_failed,
+    )
+    summary_block = build_summary_block(prev, new_state, conditions_line)
+
     lines = []
     lines.append(f"<b>📊 {ACCOUNT_LABEL}</b>")
     lines.append(f"{latest_date.strftime('%Y-%m-%d')}")
     if stale_warning:
         lines.append(stale_warning)
-    lines.append(change_line)
+    lines.extend(summary_block)
     lines.append("")
 
     # Inputs blocks
