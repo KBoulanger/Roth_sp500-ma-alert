@@ -2,12 +2,22 @@ name: Daily SPY SMA Telegram
 
 on:
   schedule:
-    - cron: '5 21 * * 2,4'  # 4:05 PM EST / 5:05 PM EDT
+    # Runs at 22:05 UTC weekdays (M-F).
+    # Translates to:
+    #   EST (winter):  17:05 ET = 5:05 PM ET — 1h+ buffer after market close, yfinance has today's data
+    #   EDT (summer):  18:05 ET = 6:05 PM ET — 2h+ buffer
+    # Previous schedule (21:05 UTC) ran at 4:05 PM ET in winter — only 5 min after close,
+    # which sometimes meant yfinance hadn't published today's close yet.
+    - cron: '5 22 * * 1-5'
   workflow_dispatch:
+
+permissions:
+  contents: write  # required to commit updated state.json back to the repo
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -19,9 +29,39 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - run: python send_spy_ma_telegram.py
+      - id: bot
+        run: python send_spy_ma_telegram.py
         env:
-            TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-            TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-            FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-            MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+
+      # Telegram alert if the bot itself crashed (e.g., dependency break, all data sources down).
+      # Without this, a silent crash means no Telegram messages and the user won't know
+      # unless they happen to check GitHub Actions email notifications.
+      - name: Notify on bot failure
+        if: failure() && steps.bot.conclusion == 'failure'
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            --data-urlencode "text=🚨 <b>BOT FAILURE</b> — daily run failed on $(date -u +'%Y-%m-%d %H:%M UTC'). Positions retained from prior run. Check workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Commit updated state.json
+        if: success()
+        run: |
+          if [ -f state.json ]; then
+            git config user.name "telegram-bot"
+            git config user.email "bot@github-actions"
+            git add state.json
+            if git diff --staged --quiet; then
+              echo "No state changes to commit."
+            else
+              git commit -m "state update $(date -u +%Y-%m-%d)"
+              git push
+            fi
+          fi
