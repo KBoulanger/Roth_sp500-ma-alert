@@ -1,168 +1,164 @@
 """Daily Telegram regime monitor for ROTH and BROKERAGE accounts.
 
-Updated 2026-04-25 to use D-asym circuit breakers (ALT-A for Roth, BROK_A for
-Brokerage) selected in the Apr 2026 v2 iteration. Defensive routing uses
-tiered_0.1 (UNRATE 3-mo change > 0.1pp -> Treasuries, else SP500).
+Updated 2026-04-26:
+  - Added SPY Leveraged (Roth/Brok) and QQQ Leveraged (Roth/Brok) sections
+    using the picks from the LETF Timing Strategy project (PROJECT_REVIEW.md)
+  - Defensive asset for leveraged sections is USFR (floating-rate Treasury)
+  - State persistence via state.json committed back to repo by GitHub Actions
+  - Health-check footer
+  - Top change-line summarizes flips/warnings/calm
+  - LTCG eligibility tracking for brokerage positions (calendar days)
+  - Existing Top-7 ALT-A / BROK_A logic UNTOUCHED; render uniform with new sections
+  - Legacy SP500 (MA250 E80 R5) sections COMMENTED OUT (compute kept, render hidden)
 
-Strategy specs (from /mnt/claude_momentum/6 Iterating further with Claude v2 Apr 2026/
-SESSION_REVIEW_2026-04-25.md):
-
+Strategy specs:
   ROTH (ALT-A): D-asym 300/50/100/5/0.40/10/tiered_0.1
-    Exit (whichever fires first):
-      Vol path:  NDX-composite 30d realized vol >= 0.40 for 10 days
-      MA path:   SPY < SMA300 for 50 days
-    Reentry:     SPY > SMA100 for 5 days
-    Defensive routing: tiered_0.1
+    Exit (whichever fires): NASDAQCOM vol30 ≥ 0.40 for 10 days OR SPY < SMA300 for 50 days
+    Reentry: SPY ≥ SMA100 for 5 days
+    Defensive routing: ΔUNRATE_3mo > 0.1pp → Treasuries, else SP500
 
   BROKERAGE (BROK_A): D-asym 300/50/100/5/0.45/25/tiered_0.1
-    Same as ROTH except vol_thr=0.45, E_vol=25 (slower vol confirmation
-    reduces tax-costly false trips)
+    Same as Roth except vol_thr=0.45 and E_vol=25
 
-Backtest convention (matched here):
-  - vol30 = 30-day rolling stdev of NASDAQCOM (FRED) simple daily returns,
-            annualized by sqrt(252), min_periods=30
-  - asym_state: strict comparisons (price < SMA, price > SMA, vol >= thr).
-                Counters reset on every state transition.
-  - Exec lag = 1 day (signal at end of day T -> trade at open of day T+1).
-  - Tiered routing uses ur_3m from the prior trading day (no look-ahead).
+  SPY LEVERAGED (Roth):     MA275 v<22% e=1 r=10 | UPRO ↔ USFR
+  SPY LEVERAGED (Brok):     MA275 v<22% e=2 r=10 | UPRO ↔ USFR
+  QQQ LEVERAGED (Roth):     MA175 v<30% e=2 r=2  | TQQQ ↔ USFR
+  QQQ LEVERAGED (Brok):     MA175 v<30% e=2 r=2  | TQQQ ↔ USFR
 
-The S&P500 Strategy sections (MA250 E80 R5) below are LEGACY and unchanged
-from the prior iteration — they are NOT the recommended strategy. Use the
-basket Top-7 sections.
+Convention for leveraged strategies:
+  raw_signal[i] = 1 if (price[i] > MA[i] AND vol20[i] < vol_thr) else 0
+  Position walked forward through full history with entry/exit lag confirmation.
+  Signal computed at end of day T → trade at close of day T+1 (1-day exec lag).
+
+Vol calculations are STRICTLY per-strategy:
+  Top-7:           NASDAQCOM 30-day vol (FRED) — series-specific to that strategy
+  SPY Leveraged:   SPY 20-day vol (yfinance/Stooq)
+  QQQ Leveraged:   QQQ 20-day vol (yfinance/Stooq)
 """
 
 import os
+import json
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 # ============================
 # Data sources
 # ============================
 
 STOOQ_SPY_URL = "https://stooq.com/q/d/l/?s=spy.us&i=d"
+STOOQ_QQQ_URL = "https://stooq.com/q/d/l/?s=qqq.us&i=d"
 FRED_API_BASE = "https://api.stlouisfed.org/fred/series/observations"
 
 ACCOUNT_LABEL = "PORTFOLIO MONITOR"
+STATE_FILE = "state.json"
 
 # ============================
-# Strategy parameters (from Apr 2026 v2 picks)
+# Strategy parameters
 # ============================
 
-ROTH_PARAMS = {
+# --- Top-7 (existing, untouched) ---
+ROTH_TOP7_PARAMS = {
     "name": "ALT-A",
-    "ma_exit": 300,    # SPY SMA window for MA-exit path
-    "E_ma":    50,     # consecutive days SPY < SMA300 to trigger MA exit
-    "ma_re":   100,    # SPY SMA window for reentry
-    "R_re":    5,      # consecutive days SPY > SMA100 to reenter
-    "vol_thr": 0.40,   # vol threshold (annualized stdev of simple returns)
-    "E_vol":   10,     # consecutive days vol >= vol_thr to trigger vol exit
-    "ur_thr":  0.1,    # tiered_0.1 routing threshold (pp)
+    "ma_exit": 300, "E_ma": 50, "ma_re": 100, "R_re": 5,
+    "vol_thr": 0.40, "E_vol": 10, "ur_thr": 0.1,
+}
+BROK_TOP7_PARAMS = {
+    "name": "BROK_A",
+    "ma_exit": 300, "E_ma": 50, "ma_re": 100, "R_re": 5,
+    "vol_thr": 0.45, "E_vol": 25, "ur_thr": 0.1,
 }
 
-BROK_PARAMS = {
-    "name": "BROK_A",
-    "ma_exit": 300,
-    "E_ma":    50,
-    "ma_re":   100,
-    "R_re":    5,
-    "vol_thr": 0.45,
-    "E_vol":   25,
-    "ur_thr":  0.1,
+# --- SPY Leveraged (new) ---
+SPY_LEV_ROTH_PARAMS = {
+    "ma": 275, "vol_thr": 0.22, "vol_window": 20, "exit_lag": 1, "entry_lag": 10,
+    "leveraged": "UPRO", "defensive": "USFR", "signal_asset": "SPY",
+}
+SPY_LEV_BROK_PARAMS = {
+    "ma": 275, "vol_thr": 0.22, "vol_window": 20, "exit_lag": 2, "entry_lag": 10,
+    "leveraged": "UPRO", "defensive": "USFR", "signal_asset": "SPY",
+}
+
+# --- QQQ Leveraged (new, same config for both accounts) ---
+QQQ_LEV_PARAMS = {
+    "ma": 175, "vol_thr": 0.30, "vol_window": 20, "exit_lag": 2, "entry_lag": 2,
+    "leveraged": "TQQQ", "defensive": "USFR", "signal_asset": "QQQ",
 }
 
 # ============================
 # Data fetching
 # ============================
 
-def fetch_spy_yfinance() -> pd.DataFrame:
-    """Primary source: yfinance (Yahoo Finance). Pull 3y to cover SMA300 + buffer."""
+def fetch_etf_yfinance(ticker: str) -> pd.DataFrame:
+    """Pull adjusted close from yfinance. ~3y of history."""
     import yfinance as yf
-    df = yf.download("SPY", period="3y", auto_adjust=True, progress=False)
+    df = yf.download(ticker, period="3y", auto_adjust=True, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df.columns = [c.strip().title() for c in df.columns]
     if "Close" not in df.columns:
-        raise ValueError(f"yfinance: 'Close' column not found. Got: {list(df.columns)}")
+        raise ValueError(f"yfinance {ticker}: 'Close' not found. Got: {list(df.columns)}")
     df = df[["Close"]].dropna()
     if df.empty:
-        raise ValueError("yfinance returned empty data")
+        raise ValueError(f"yfinance {ticker} returned empty")
     return df
 
 
-def fetch_spy_stooq() -> pd.DataFrame:
-    """Fallback source: Stooq CSV."""
-    try:
-        df = pd.read_csv(STOOQ_SPY_URL)
-    except Exception as e:
-        raise ValueError(f"Stooq CSV read failed: {e}")
+def fetch_etf_stooq(ticker: str) -> pd.DataFrame:
+    """Stooq fallback for SPY or QQQ."""
+    url = STOOQ_SPY_URL if ticker.upper() == "SPY" else STOOQ_QQQ_URL
+    df = pd.read_csv(url)
     if df.empty or "Close" not in df.columns:
-        raise ValueError(f"Stooq returned unusable data. Columns: {list(df.columns) if not df.empty else 'empty'}")
+        raise ValueError(f"Stooq {ticker} returned unusable data")
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date").set_index("Date")
     return df[["Close"]].dropna()
 
 
-def fetch_spy_history() -> pd.DataFrame:
-    """Try yfinance first, fall back to Stooq."""
+def fetch_etf(ticker: str) -> pd.DataFrame:
+    """yfinance primary, Stooq fallback."""
     try:
-        return fetch_spy_yfinance()
+        return fetch_etf_yfinance(ticker)
     except Exception as e:
-        print(f"yfinance failed: {e}, falling back to Stooq")
+        print(f"yfinance {ticker} failed: {e}, falling back to Stooq")
     try:
-        return fetch_spy_stooq()
+        return fetch_etf_stooq(ticker)
     except Exception as e:
-        raise RuntimeError(f"All SPY data sources failed. Last error: {e}")
+        raise RuntimeError(f"All {ticker} sources failed. Last error: {e}")
 
 
 def fetch_nasdaqcom_fred_api(api_key: str, observation_start: str = None) -> pd.DataFrame:
-    """Fetch NASDAQCOM (Nasdaq Composite) daily series from FRED API.
-
-    Matches the backtest's vol30 input series exactly (fwk_core.py reads
-    nasdaqcom.csv from FRED's NASDAQCOM series).
-    """
-    params = {
-        "series_id": "NASDAQCOM",
-        "api_key": api_key,
-        "file_type": "json",
-        "sort_order": "asc",
-    }
+    """NASDAQCOM (Nasdaq Composite) from FRED. Used by Top-7 vol30."""
+    params = {"series_id": "NASDAQCOM", "api_key": api_key, "file_type": "json", "sort_order": "asc"}
     if observation_start:
         params["observation_start"] = observation_start
     resp = requests.get(FRED_API_BASE, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-
     records = []
     for obs in data.get("observations", []):
-        date_str = obs.get("date")
-        value_str = obs.get("value")
-        if date_str and value_str and value_str != ".":
+        d, v = obs.get("date"), obs.get("value")
+        if d and v and v != ".":
             try:
-                records.append({"Date": pd.to_datetime(date_str), "NDX": float(value_str)})
+                records.append({"Date": pd.to_datetime(d), "NDX": float(v)})
             except (ValueError, TypeError):
                 continue
-    df = pd.DataFrame(records).sort_values("Date").set_index("Date")
-    return df
+    return pd.DataFrame(records).sort_values("Date").set_index("Date")
 
 
 def fetch_nasdaqcom_csv_fallback() -> pd.DataFrame:
-    """Fallback: scrape NASDAQCOM from FRED CSV graph endpoint."""
     url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
     df = pd.read_csv(url)
     date_col = "DATE" if "DATE" in df.columns else "observation_date"
     df = df.rename(columns={date_col: "Date", "NASDAQCOM": "NDX"})
     df["Date"] = pd.to_datetime(df["Date"])
     df["NDX"] = pd.to_numeric(df["NDX"], errors="coerce")
-    df = df.dropna().sort_values("Date").set_index("Date")
-    return df
+    return df.dropna().sort_values("Date").set_index("Date")
 
 
 def fetch_nasdaqcom() -> pd.DataFrame:
-    """Try FRED API first, fall back to CSV. Returns last ~3 years."""
     api_key = os.environ.get("FRED_API_KEY")
-    # Pull 3 years back to ensure we have enough for SMA300 + state walker convergence
     obs_start = (pd.Timestamp.today() - pd.Timedelta(days=365 * 4)).strftime("%Y-%m-%d")
     if api_key:
         try:
@@ -172,147 +168,95 @@ def fetch_nasdaqcom() -> pd.DataFrame:
         except Exception as e:
             print(f"FRED NASDAQCOM API failed: {e}, falling back to CSV")
     df = fetch_nasdaqcom_csv_fallback()
-    # Trim to last 4 years
     cutoff = pd.Timestamp.today() - pd.Timedelta(days=365 * 4)
     return df[df.index >= cutoff].copy()
 
 
 def fetch_unrate_fred_api(api_key: str) -> pd.DataFrame:
-    """Fetch UNRATE from FRED API."""
-    params = {
-        "series_id": "UNRATE",
-        "api_key": api_key,
-        "file_type": "json",
-        "sort_order": "desc",
-        "limit": 12,
-    }
+    params = {"series_id": "UNRATE", "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": 12}
     resp = requests.get(FRED_API_BASE, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
-
     records = []
     for obs in data.get("observations", []):
-        date_str = obs.get("date")
-        value_str = obs.get("value")
-        if date_str and value_str and value_str != ".":
-            records.append({"DATE": pd.to_datetime(date_str), "UNRATE": float(value_str)})
+        d, v = obs.get("date"), obs.get("value")
+        if d and v and v != ".":
+            records.append({"DATE": pd.to_datetime(d), "UNRATE": float(v)})
     return pd.DataFrame(records).sort_values("DATE").reset_index(drop=True)
 
 
 def fetch_unrate_fallback() -> pd.DataFrame:
-    """Fallback: fetch UNRATE from FRED CSV."""
     url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE"
     df = pd.read_csv(url)
     date_col = "DATE" if "DATE" in df.columns else "observation_date"
     df = df.rename(columns={date_col: "DATE"})
     df["DATE"] = pd.to_datetime(df["DATE"])
     df["UNRATE"] = pd.to_numeric(df["UNRATE"], errors="coerce")
-    df = df.dropna().sort_values("DATE").reset_index(drop=True)
-    return df.tail(12).reset_index(drop=True)
+    return df.dropna().sort_values("DATE").reset_index(drop=True).tail(12).reset_index(drop=True)
 
 
 def fetch_unrate() -> pd.DataFrame:
-    """Try FRED API first, fall back to CSV scraping."""
     api_key = os.environ.get("FRED_API_KEY")
     if api_key:
         try:
             return fetch_unrate_fred_api(api_key)
         except Exception as e:
-            print(f"FRED API failed: {e}, falling back to CSV")
+            print(f"FRED UNRATE API failed: {e}, falling back to CSV")
     return fetch_unrate_fallback()
 
 
 # ============================
-# Vol calculation (matches fwk_core.py exactly)
+# Vol calculations
 # ============================
 
 def compute_vol30(ndx_series: pd.Series) -> pd.Series:
-    """30-day rolling stdev of simple returns, annualized by sqrt(252).
+    """30-day rolling stdev of simple returns × √252. Used by Top-7 (NASDAQCOM)."""
+    return ndx_series.pct_change().rolling(30, min_periods=30).std() * np.sqrt(252)
 
-    Matches fwk_core.py line 63:
-      ndx_ret = ndx[1:] / ndx[:-1] - 1.0
-      vol30 = pd.Series(ndx_ret).rolling(30, min_periods=30).std().values * np.sqrt(252)
-    """
-    simple_ret = ndx_series.pct_change()
-    vol = simple_ret.rolling(30, min_periods=30).std() * np.sqrt(252)
-    return vol
+
+def compute_vol20(price_series: pd.Series) -> pd.Series:
+    """20-day rolling stdev of simple returns × √252. Used by SPY/QQQ Leveraged."""
+    return price_series.pct_change().rolling(20, min_periods=20).std() * np.sqrt(252)
 
 
 # ============================
-# D-asym state walker (matches fwk_core.asym_state exactly)
+# State walkers
 # ============================
 
 def walk_dasym_state(spy: pd.Series, sma_exit: pd.Series, sma_re: pd.Series,
-                      vol30: pd.Series, vol_thr: float, E_vol: int, E_ma: int, R_re: int) -> dict:
-    """Walk through the joint history to determine current D-asym state and counters.
-
-    All inputs must be aligned on the same index (SPY trading days). vol30 will
-    have NaN for days where NASDAQCOM was missing or for the first 29 days; we
-    handle NaN exactly as fwk_core does (NaN vol does NOT increment ev counter).
-
-    State semantics:
-      - Initial state assumed 'invested' at the start of the window. We need
-        enough history (>= max(ma_exit, ma_re) days, plus a buffer for the
-        state walker to converge through any past transitions) for the current
-        state to be reliable.
-      - On each day i:
-          ev (vol counter): +=1 if vol30[i] >= vol_thr (and not NaN), else 0
-          em (MA-exit counter): +=1 if SPY[i] < SMA[ma_exit][i], else 0
-          rc (reentry counter): +=1 if SPY[i] > SMA[ma_re][i], else 0
-          if invested: trigger defensive if ev >= E_vol OR em >= E_ma; reset all
-          if defensive: trigger reentry if rc >= R_re; reset all
-
-    Returns dict with: state, vol_streak, ma_streak, reentry_streak,
-    last_transition_date, last_transition_reason, current_vol, current_spy,
-    current_sma_exit, current_sma_re, latest_date.
-    """
+                     vol30: pd.Series, vol_thr: float, E_vol: int, E_ma: int, R_re: int) -> dict:
+    """D-asym walker for Top-7 (existing, untouched)."""
     state = "invested"
     ev = em = rc = 0
     last_transition_date = None
     last_transition_reason = None
 
     for i in range(len(spy)):
-        p = spy.iloc[i]
-        mx = sma_exit.iloc[i]
-        mr = sma_re.iloc[i]
+        p = spy.iloc[i]; mx = sma_exit.iloc[i]; mr = sma_re.iloc[i]
         v = vol30.iloc[i] if i < len(vol30) else np.nan
-        date = spy.index[i]
+        d = spy.index[i]
         if pd.isna(p) or pd.isna(mx) or pd.isna(mr):
             continue
-
-        # Update counters
-        if not pd.isna(v) and v >= vol_thr:
-            ev += 1
-        else:
-            ev = 0
-        if p < mx:
-            em += 1
-        else:
-            em = 0
-        if p > mr:
-            rc += 1
-        else:
-            rc = 0
-
-        # State transitions
+        if not pd.isna(v) and v >= vol_thr: ev += 1
+        else: ev = 0
+        if p < mx: em += 1
+        else: em = 0
+        if p > mr: rc += 1
+        else: rc = 0
         if state == "invested":
             if ev >= E_vol or em >= E_ma:
-                last_transition_date = date
+                last_transition_date = d
                 last_transition_reason = "vol path" if ev >= E_vol else "MA path"
-                state = "defensive"
-                ev = em = rc = 0
-        else:  # defensive
+                state = "defensive"; ev = em = rc = 0
+        else:
             if rc >= R_re:
-                last_transition_date = date
+                last_transition_date = d
                 last_transition_reason = "reentry"
-                state = "invested"
-                ev = em = rc = 0
+                state = "invested"; ev = em = rc = 0
 
     return {
         "state": state,
-        "vol_streak": ev,
-        "ma_streak": em,
-        "reentry_streak": rc,
+        "vol_streak": ev, "ma_streak": em, "reentry_streak": rc,
         "last_transition_date": last_transition_date,
         "last_transition_reason": last_transition_reason,
         "current_vol": float(vol30.iloc[-1]) if not pd.isna(vol30.iloc[-1]) else None,
@@ -323,69 +267,313 @@ def walk_dasym_state(spy: pd.Series, sma_exit: pd.Series, sma_re: pd.Series,
     }
 
 
+def walk_lev_state(price: pd.Series, ma: pd.Series, vol20: pd.Series,
+                   vol_thr: float, exit_lag: int, entry_lag: int) -> dict:
+    """Walker for SPY/QQQ Leveraged strategies.
+
+    raw_signal[i] = 1 if (price > MA AND vol20 < vol_thr) else 0
+    Apply entry_lag (consecutive ON days to ENTER) and exit_lag (OFF to EXIT).
+    Initial state assumed 'defensive' before first entry; walker converges
+    once enough history has been processed.
+    """
+    state = "defensive"
+    days_on = days_off = 0
+    last_transition_date = None
+    last_transition_reason = None
+
+    for i in range(len(price)):
+        p = price.iloc[i]; m = ma.iloc[i]; v = vol20.iloc[i]
+        d = price.index[i]
+        if pd.isna(p) or pd.isna(m) or pd.isna(v):
+            continue
+        raw = 1 if (p > m and v < vol_thr) else 0
+        if raw == 1:
+            days_on += 1; days_off = 0
+        else:
+            days_off += 1; days_on = 0
+        if state == "defensive":
+            if days_on >= entry_lag:
+                last_transition_date = d
+                last_transition_reason = "reentry"
+                state = "invested"; days_on = days_off = 0
+        else:  # invested
+            if days_off >= exit_lag:
+                last_transition_date = d
+                last_transition_reason = "vol or MA path"
+                state = "defensive"; days_on = days_off = 0
+
+    return {
+        "state": state,
+        "days_on_streak": days_on,
+        "days_off_streak": days_off,
+        "last_transition_date": last_transition_date,
+        "last_transition_reason": last_transition_reason,
+        "current_price": float(price.iloc[-1]),
+        "current_ma": float(ma.iloc[-1]) if not pd.isna(ma.iloc[-1]) else None,
+        "current_vol": float(vol20.iloc[-1]) if not pd.isna(vol20.iloc[-1]) else None,
+    }
+
+
 # ============================
 # Helpers
 # ============================
 
 def count_streak(series: pd.Series) -> int:
-    """Count consecutive True values from the end of the series."""
     c = 0
     for v in reversed(series.tolist()):
-        if bool(v):
-            c += 1
-        else:
-            break
+        if bool(v): c += 1
+        else: break
     return c
 
 
 def find_exit_and_recovery(below_series: pd.Series, exit_threshold: int, reentry_threshold: int = 5) -> dict:
-    """Legacy DMA exit/recovery detector (used by the SP500 holdings sections)."""
-    values = below_series.tolist()
-    dates = below_series.index.tolist()
-
+    """Legacy DMA exit/recovery detector — kept for compatibility but NOT rendered."""
+    values = below_series.tolist(); dates = below_series.index.tolist()
     days_above = 0
     for v in reversed(values):
-        if not v:
-            days_above += 1
-        else:
-            break
-
+        if not v: days_above += 1
+        else: break
     if days_above == 0:
         below_streak = count_streak(below_series)
         return {"exited": below_streak >= exit_threshold, "exit_day": None,
                 "days_above_since_exit": 0, "recovering": False,
                 "reentry_threshold": reentry_threshold}
-
     idx_start_of_above = len(values) - days_above
     if idx_start_of_above <= 0:
         return {"exited": False, "exit_day": None, "days_above_since_exit": days_above,
                 "recovering": False, "reentry_threshold": reentry_threshold}
-
     below_streak_before = 0
     for i in range(idx_start_of_above - 1, -1, -1):
-        if values[i]:
-            below_streak_before += 1
-        else:
-            break
-
+        if values[i]: below_streak_before += 1
+        else: break
     if below_streak_before >= exit_threshold:
         return {"exited": True,
                 "exit_day": dates[idx_start_of_above - 1] if idx_start_of_above > 0 else None,
                 "days_above_since_exit": days_above,
                 "recovering": days_above < reentry_threshold,
                 "reentry_threshold": reentry_threshold}
-
     return {"exited": False, "exit_day": None, "days_above_since_exit": days_above,
             "recovering": False, "reentry_threshold": reentry_threshold}
 
 
 def send_telegram(bot_token: str, chat_id: str, text: str):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
-               "disable_web_page_preview": True}
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
     resp = requests.post(url, json=payload, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def days_in_strategy(walker_state: dict, fallback_first_date) -> tuple:
+    """Return (N_days, exact) where N_days is calendar days the strategy has
+    been in its current state, derived from the walker's last_transition_date.
+
+    If walker has a last_transition_date: N = today - that date, exact=True.
+    If no transition in the data window: N = today - fallback_first_date, exact=False
+    (meaning "at least N days; no flip in the data window").
+    """
+    ltd = walker_state.get("last_transition_date")
+    if ltd is not None:
+        if isinstance(ltd, pd.Timestamp):
+            ltd = ltd.date()
+        return max(0, (date.today() - ltd).days), True
+    if fallback_first_date is not None:
+        if isinstance(fallback_first_date, pd.Timestamp):
+            fallback_first_date = fallback_first_date.date()
+        return max(0, (date.today() - fallback_first_date).days), False
+    return 0, False
+
+
+def hourglass_if_progressing(streak: int, threshold: int) -> str:
+    """Return ⏳ when any non-zero progress; ⚠️ when within 1 of threshold; '' otherwise."""
+    if streak == 0:
+        return ""
+    if streak >= threshold - 1:
+        return "⚠️"
+    return "⏳"
+
+
+# ============================
+# State persistence (state.json)
+# ============================
+
+def load_state() -> dict:
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE) as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Failed to read {STATE_FILE}: {e}. Bootstrapping new state.")
+    return {}
+
+
+def save_state(state: dict):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2, default=str)
+
+
+# ============================
+# Render helpers
+# ============================
+
+def _format_days_in_strategy(currently: str, walker_state: dict, fallback_first_date) -> str:
+    """Build the 'Currently X for N days' line. Uses walker's last_transition_date
+    when available; otherwise fallback to data window start with a '+' suffix."""
+    n_days, exact = days_in_strategy(walker_state, fallback_first_date)
+    if exact:
+        return f"<i>Currently {currently} for {n_days} days (since signal flip on {walker_state['last_transition_date'].date() if isinstance(walker_state['last_transition_date'], pd.Timestamp) else walker_state['last_transition_date']})</i>"
+    return f"<i>Currently {currently} for {n_days}+ days (no flip in current data window)</i>"
+
+
+def render_top7_section(label_prefix: str, params: dict, st: dict,
+                        fallback_first_date, unrate_failed: bool = False) -> list:
+    lines = []
+    lines.append(f"<b>Top-7 ({label_prefix}) — {params['name']}</b>")
+    lines.append(f"<i>D-asym {params['ma_exit']}/{params['E_ma']}/{params['ma_re']}/{params['R_re']}/"
+                 f"{params['vol_thr']:.2f}/{params['E_vol']}/tiered_{params['ur_thr']} | "
+                 f"basket: TOP-7 stocks | defensive: tiered_{params['ur_thr']}</i>")
+
+    # Determine current holding
+    if st["state"] == "invested":
+        held = "TOP-7 STOCKS"
+    else:
+        # Defensive routing depends on UNRATE
+        held = "TREASURIES" if st["_unrate_high"] else "SP500"
+        if unrate_failed:
+            held = f"{held} ⚠️"
+    lines.append(f"➤ <b>HOLD: {held}</b>")
+
+    # Exit conditions
+    if st["state"] == "invested":
+        lines.append("<u>Exit</u> (→ defensive, whichever fires first):")
+        vol_emoji = hourglass_if_progressing(st["vol_streak"], params["E_vol"])
+        ma_emoji = hourglass_if_progressing(st["ma_streak"], params["E_ma"])
+        lines.append(f"  • Vol path: {st['vol_streak']}/{params['E_vol']} days where (NASDAQCOM vol30 ≥ {int(params['vol_thr']*100)}%) {vol_emoji}".rstrip())
+        lines.append(f"  • MA path:  {st['ma_streak']}/{params['E_ma']} days where (SP500 &lt; SMA{params['ma_exit']}) {ma_emoji}".rstrip())
+        lines.append(f"<u>Reentry</u> (→ TOP-7): — (rule: {params['R_re']} consecutive days where SP500 ≥ SMA{params['ma_re']})")
+    else:
+        lines.append(f"<u>Exit</u> (→ defensive): — (rules: NASDAQCOM vol30 ≥ {int(params['vol_thr']*100)}% for {params['E_vol']}d OR SP500 &lt; SMA{params['ma_exit']} for {params['E_ma']}d)")
+        re_emoji = hourglass_if_progressing(st["reentry_streak"], params["R_re"])
+        lines.append(f"<u>Reentry</u> (→ TOP-7): {st['reentry_streak']}/{params['R_re']} days where (SP500 ≥ SMA{params['ma_re']}) {re_emoji}".rstrip())
+
+    if unrate_failed:
+        lines.append(f"<u>Defensive routing</u>: ⚠️ <b>UNRATE FETCH FAILED</b> — assuming stable (→ SP500). Verify manually before acting.")
+    else:
+        lines.append(f"<u>Defensive routing</u>: ΔUNRATE_3mo &gt; {params['ur_thr']}pp → Treasuries, else → SP500")
+
+    # "Currently X for N days" line
+    if st["state"] == "invested":
+        currently = "TOP-7 STOCKS"
+    else:
+        currently = "TREASURIES" if st["_unrate_high"] else "SP500"
+    lines.append(_format_days_in_strategy(currently, st, fallback_first_date))
+    return lines
+
+
+def render_lev_section(label: str, params: dict, st: dict, fallback_first_date) -> list:
+    """Render SPY Leveraged or QQQ Leveraged section."""
+    lines = []
+    sig = params["signal_asset"]
+    lev = params["leveraged"]
+    defv = params["defensive"]
+    ma_n = params["ma"]
+    vt = int(params["vol_thr"] * 100)
+    el = params["exit_lag"]
+    rl = params["entry_lag"]
+
+    lines.append(f"<b>{label}</b>")
+    lines.append(f"<i>MA{ma_n} v&lt;{vt}% e={el} r={rl} | leveraged: {lev} | defensive: {defv}</i>")
+
+    held = lev if st["state"] == "invested" else defv
+    lines.append(f"➤ <b>HOLD: {held}</b>")
+
+    exit_rule = f"{sig} &lt; SMA{ma_n} OR {sig} vol20 ≥ {vt}%"
+    reentry_rule = f"{sig} &gt; SMA{ma_n} AND {sig} vol20 &lt; {vt}%"
+
+    if st["state"] == "invested":
+        emoji = hourglass_if_progressing(st["days_off_streak"], el)
+        lines.append(f"<u>Exit</u> (→ {defv}): {st['days_off_streak']}/{el} days where ({exit_rule}) {emoji}".rstrip())
+        days_word = "day" if rl == 1 else "days"
+        lines.append(f"<u>Reentry</u> (→ {lev}): — (rule: {rl} consecutive {days_word} where {reentry_rule})")
+    else:
+        days_word = "day" if el == 1 else "days"
+        lines.append(f"<u>Exit</u> (→ {defv}): — (rule: {el} consecutive {days_word} where {exit_rule})")
+        emoji = hourglass_if_progressing(st["days_on_streak"], rl)
+        lines.append(f"<u>Reentry</u> (→ {lev}): {st['days_on_streak']}/{rl} days where ({reentry_rule}) {emoji}".rstrip())
+
+    # "Currently X for N days" line
+    currently = lev if st["state"] == "invested" else defv
+    lines.append(_format_days_in_strategy(currently, st, fallback_first_date))
+    return lines
+
+
+# ============================
+# Change-line builder
+# ============================
+
+def build_change_line(prev_state: dict, new_state: dict) -> str:
+    """Build the top-of-message status: 🚨 ACTION / ⚠️ APPROACHING / ⏳ WATCH / 📭 calm.
+
+    new_state structure (per strategy key):
+      { "position": "<asset>",
+        "exit_streak": N, "exit_threshold": M,
+        "reentry_streak": N, "reentry_threshold": M,
+        "state": "invested"|"defensive",
+        "label": "Display Name",
+        "paths": [(name, streak, threshold), ...]   # optional, for Top-7 multi-path
+      }
+    """
+    flips = []        # confirmed today: position changed
+    approaching = []  # one day from threshold (active counter == threshold - 1)
+    watching = []     # any non-zero active counter
+
+    def categorize(label_text, streak, threshold, direction):
+        if streak == 0 or threshold <= 0:
+            return  # calm
+        if threshold > 1 and streak == threshold - 1:
+            approaching.append((label_text, direction, streak, threshold))
+        elif streak >= 1 and streak < threshold:
+            watching.append((label_text, direction, streak, threshold))
+
+    for key, ns in new_state.items():
+        if key.startswith("_"): continue
+        prev_pos = prev_state.get(key, {}).get("position")
+        if prev_pos and prev_pos != ns["position"]:
+            flips.append((ns["label"], prev_pos, ns["position"]))
+            continue
+        # No flip — check approach status of active counter(s)
+        if ns["state"] == "invested":
+            # If this strategy has multiple exit paths (Top-7 vol AND MA), surface each
+            paths = ns.get("paths")
+            if paths:
+                for path_name, streak, threshold in paths:
+                    categorize(f"{ns['label']} {path_name}", streak, threshold, "exit")
+            else:
+                categorize(ns["label"], ns.get("exit_streak", 0), ns.get("exit_threshold", 1), "exit")
+        else:
+            categorize(ns["label"], ns.get("reentry_streak", 0), ns.get("reentry_threshold", 1), "reentry")
+
+    if flips:
+        # Build SELL X / BUY Y action checklist
+        bits = [f"SELL {frm}, BUY {to}  ({lbl})" for lbl, frm, to in flips]
+        if len(flips) == 1:
+            return f"🚨 ACTION REQUIRED tomorrow at MOC (before 3:50pm ET): {bits[0]}."
+        joined = "\n  • ".join(bits)
+        return f"🚨 ACTION REQUIRED tomorrow at MOC (before 3:50pm ET) — {len(flips)} flips:\n  • {joined}"
+
+    if approaching:
+        bits = [f"{lbl} {direction} {s}/{t} (1 day from {direction})" for lbl, direction, s, t in approaching]
+        if len(approaching) == 1:
+            return f"⚠️ APPROACHING FLIP — {bits[0]}. All other strategies stable."
+        joined = "\n  • ".join(bits)
+        return f"⚠️ APPROACHING FLIP — {len(approaching)} signals near threshold:\n  • {joined}"
+
+    if watching:
+        bits = [f"{lbl} {direction} {s}/{t}" for lbl, direction, s, t in watching]
+        joined = "; ".join(bits)
+        return f"⏳ WATCH — {joined}. No flips."
+
+    return "📭 No changes since previous run."
 
 
 # ============================
@@ -406,197 +594,331 @@ def main():
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    # --- Load data ---
-    spy_df = fetch_spy_history()              # SPY daily close, ~3y
-    ndx_df = fetch_nasdaqcom()                # NASDAQCOM daily close, ~4y
-    un = fetch_unrate()                        # UNRATE monthly, last 12
+    # ============ Data fetch with health tracking ============
+    health = {"SPY": False, "QQQ": False, "NASDAQCOM": False, "UNRATE": False}
 
-    # Align NASDAQCOM to SPY trading days (forward-fill missing NDX days to match)
+    try:
+        spy_df = fetch_etf("SPY"); health["SPY"] = True
+    except Exception as e:
+        print(f"FATAL: SPY fetch failed: {e}")
+        send_telegram(bot_token, chat_id, f"<b>⚠️ Bot error</b>\nSPY fetch failed: {e}\nRun aborted; positions retained.")
+        return
+
+    try:
+        qqq_df = fetch_etf("QQQ"); health["QQQ"] = True
+    except Exception as e:
+        print(f"WARN: QQQ fetch failed: {e}")
+        qqq_df = None
+
+    try:
+        ndx_df = fetch_nasdaqcom(); health["NASDAQCOM"] = True
+    except Exception as e:
+        print(f"WARN: NASDAQCOM fetch failed: {e}")
+        ndx_df = None
+
+    try:
+        un = fetch_unrate(); health["UNRATE"] = True
+    except Exception as e:
+        print(f"WARN: UNRATE fetch failed: {e}")
+        un = None
+
+    # ============ Align to SPY trading days ============
     spy_close = spy_df["Close"].copy()
     spy_close.index = pd.to_datetime(spy_close.index).normalize()
-    ndx_close = ndx_df["NDX"].copy()
-    ndx_close.index = pd.to_datetime(ndx_close.index).normalize()
-
-    # Align: reindex NASDAQCOM to SPY's trading days
-    ndx_aligned = ndx_close.reindex(spy_close.index)
-    # If FRED has gaps within SPY's trading days, leave as NaN — vol calc will skip
-    vol30 = compute_vol30(ndx_aligned)
-
     latest_date = spy_close.index[-1]
     latest_close = float(spy_close.iloc[-1])
 
-    # ============================
-    # Calculate Moving Averages
-    # ============================
-
+    # MAs for Top-7 + legacy
     sma50 = spy_close.rolling(50).mean()
     sma100 = spy_close.rolling(100).mean()
     sma250 = spy_close.rolling(250).mean()
     sma300 = spy_close.rolling(300).mean()
+    sma275 = spy_close.rolling(275).mean()  # NEW for SPY Leveraged
 
-    sma50_value = float(sma50.iloc[-1])
-    sma100_value = float(sma100.iloc[-1])
-    sma250_value = float(sma250.iloc[-1])
-    sma300_value = float(sma300.iloc[-1])
+    sma50_v = float(sma50.iloc[-1]); sma100_v = float(sma100.iloc[-1])
+    sma250_v = float(sma250.iloc[-1]); sma300_v = float(sma300.iloc[-1])
+    sma275_v = float(sma275.iloc[-1])
 
-    below_sma50 = spy_close < sma50
+    # SPY 20-day vol (for SPY Leveraged)
+    spy_vol20 = compute_vol20(spy_close)
+    spy_vol20_v = float(spy_vol20.iloc[-1]) if not pd.isna(spy_vol20.iloc[-1]) else None
+
+    # NASDAQCOM 30-day vol (for Top-7)
+    if ndx_df is not None:
+        ndx_close = ndx_df["NDX"].copy()
+        ndx_close.index = pd.to_datetime(ndx_close.index).normalize()
+        ndx_aligned = ndx_close.reindex(spy_close.index)
+        vol30 = compute_vol30(ndx_aligned)
+        vol30_v = float(vol30.iloc[-1]) if not pd.isna(vol30.iloc[-1]) else None
+    else:
+        vol30 = pd.Series(np.nan, index=spy_close.index)
+        vol30_v = None
+
+    # QQQ data + 175-day MA + 20-day vol
+    if qqq_df is not None:
+        qqq_close = qqq_df["Close"].copy()
+        qqq_close.index = pd.to_datetime(qqq_close.index).normalize()
+        qqq_close = qqq_close.reindex(spy_close.index, method="ffill")
+        qqq_sma175 = qqq_close.rolling(175).mean()
+        qqq_vol20 = compute_vol20(qqq_close)
+        qqq_close_v = float(qqq_close.iloc[-1])
+        qqq_sma175_v = float(qqq_sma175.iloc[-1]) if not pd.isna(qqq_sma175.iloc[-1]) else None
+        qqq_vol20_v = float(qqq_vol20.iloc[-1]) if not pd.isna(qqq_vol20.iloc[-1]) else None
+    else:
+        qqq_close = qqq_sma175 = qqq_vol20 = None
+        qqq_close_v = qqq_sma175_v = qqq_vol20_v = None
+
+    # Below-MA series for legacy (kept, not rendered)
     below_sma250 = spy_close < sma250
-
-    below_streak_50 = count_streak(below_sma50)
     below_streak_250 = count_streak(below_sma250)
 
-    # ============================
-    # UNRATE logic (3-month change)
-    # ============================
-
-    un_now = un.iloc[-1]
-    un_prior = un.iloc[-4] if len(un) >= 4 else un.iloc[0]
-    un_now_rate = float(un_now["UNRATE"])
-    un_prior_rate = float(un_prior["UNRATE"])
-    un_chg = un_now_rate - un_prior_rate
-
-    # Tiered_0.1 flag (used by both new basket strategies)
-    un_flag_01 = un_chg > 0.1
-    # Legacy 0.3 flag is no longer used — kept here for reference / removable
-    un_flag_03 = un_chg > 0.3
-
-    # ============================
-    # ROTH BASKET: ALT-A (D-asym 300/50/100/5/0.40/10/tiered_0.1)
-    # ============================
-
-    roth_state = walk_dasym_state(
-        spy=spy_close, sma_exit=sma300, sma_re=sma100, vol30=vol30,
-        vol_thr=ROTH_PARAMS["vol_thr"], E_vol=ROTH_PARAMS["E_vol"],
-        E_ma=ROTH_PARAMS["E_ma"], R_re=ROTH_PARAMS["R_re"],
-    )
-
-    if roth_state["state"] == "invested":
-        roth_position = "TOP-7 STOCKS"
+    # UNRATE delta
+    if un is not None and len(un) >= 4:
+        un_now_rate = float(un.iloc[-1]["UNRATE"])
+        un_prior_rate = float(un.iloc[-4]["UNRATE"])
+        un_chg = un_now_rate - un_prior_rate
+        un_flag_01 = un_chg > 0.1
     else:
-        roth_position = "TREASURIES" if un_flag_01 else "SP500"
+        un_chg = 0.0
+        un_flag_01 = False
 
-    # ============================
-    # ROTH SP500 HOLDINGS: legacy MA250_E80_R5 (UNCHANGED)
-    # NOTE: this is the legacy SP500-side overlay, NOT the recommended Top-7 pick.
-    # ============================
+    # ============ Run state walkers ============
+    roth_top7_st = walk_dasym_state(
+        spy=spy_close, sma_exit=sma300, sma_re=sma100, vol30=vol30,
+        vol_thr=ROTH_TOP7_PARAMS["vol_thr"], E_vol=ROTH_TOP7_PARAMS["E_vol"],
+        E_ma=ROTH_TOP7_PARAMS["E_ma"], R_re=ROTH_TOP7_PARAMS["R_re"])
+    roth_top7_st["_unrate_high"] = un_flag_01
 
+    brok_top7_st = walk_dasym_state(
+        spy=spy_close, sma_exit=sma300, sma_re=sma100, vol30=vol30,
+        vol_thr=BROK_TOP7_PARAMS["vol_thr"], E_vol=BROK_TOP7_PARAMS["E_vol"],
+        E_ma=BROK_TOP7_PARAMS["E_ma"], R_re=BROK_TOP7_PARAMS["R_re"])
+    brok_top7_st["_unrate_high"] = un_flag_01
+
+    spy_lev_roth_st = walk_lev_state(
+        price=spy_close, ma=sma275, vol20=spy_vol20,
+        vol_thr=SPY_LEV_ROTH_PARAMS["vol_thr"],
+        exit_lag=SPY_LEV_ROTH_PARAMS["exit_lag"],
+        entry_lag=SPY_LEV_ROTH_PARAMS["entry_lag"])
+
+    spy_lev_brok_st = walk_lev_state(
+        price=spy_close, ma=sma275, vol20=spy_vol20,
+        vol_thr=SPY_LEV_BROK_PARAMS["vol_thr"],
+        exit_lag=SPY_LEV_BROK_PARAMS["exit_lag"],
+        entry_lag=SPY_LEV_BROK_PARAMS["entry_lag"])
+
+    if qqq_close is not None:
+        qqq_lev_st = walk_lev_state(
+            price=qqq_close, ma=qqq_sma175, vol20=qqq_vol20,
+            vol_thr=QQQ_LEV_PARAMS["vol_thr"],
+            exit_lag=QQQ_LEV_PARAMS["exit_lag"],
+            entry_lag=QQQ_LEV_PARAMS["entry_lag"])
+    else:
+        qqq_lev_st = None
+
+    # ============ Legacy (compute kept, render hidden) ============
     state_roth_sp500 = find_exit_and_recovery(below_sma250, exit_threshold=80, reentry_threshold=5)
     exited_roth_sp500 = state_roth_sp500["exited"] or state_roth_sp500["recovering"]
     reentry_roth_sp500 = state_roth_sp500["exited"] and state_roth_sp500["days_above_since_exit"] >= 5
-
     if exited_roth_sp500 and not reentry_roth_sp500:
-        roth_sp500_position = "TREASURIES"
-        roth_sp500_status = "EXITED"
+        roth_sp500_position = "TREASURIES"; roth_sp500_status = "EXITED"
     else:
-        roth_sp500_position = "SP500"
-        roth_sp500_status = "INVESTED"
-
-    # ============================
-    # BROKERAGE BASKET: BROK_A (D-asym 300/50/100/5/0.45/25/tiered_0.1)
-    # ============================
-
-    brok_state = walk_dasym_state(
-        spy=spy_close, sma_exit=sma300, sma_re=sma100, vol30=vol30,
-        vol_thr=BROK_PARAMS["vol_thr"], E_vol=BROK_PARAMS["E_vol"],
-        E_ma=BROK_PARAMS["E_ma"], R_re=BROK_PARAMS["R_re"],
-    )
-
-    if brok_state["state"] == "invested":
-        brok_position = "TOP-7 STOCKS"
-    else:
-        brok_position = "TREASURIES" if un_flag_01 else "SP500"
-
-    # ============================
-    # BROKERAGE SP500 HOLDINGS: legacy MA250_E80_R5 (UNCHANGED)
-    # ============================
+        roth_sp500_position = "SP500"; roth_sp500_status = "INVESTED"
 
     state_brokerage_sp500 = find_exit_and_recovery(below_sma250, exit_threshold=80, reentry_threshold=5)
     exited_brokerage_sp500 = state_brokerage_sp500["exited"] or state_brokerage_sp500["recovering"]
     reentry_brokerage_sp500 = state_brokerage_sp500["exited"] and state_brokerage_sp500["days_above_since_exit"] >= 5
-
     if exited_brokerage_sp500 and not reentry_brokerage_sp500:
-        brokerage_sp500_position = "TREASURIES"
-        brokerage_sp500_status = "EXITED"
+        brokerage_sp500_position = "TREASURIES"; brokerage_sp500_status = "EXITED"
     else:
-        brokerage_sp500_position = "SP500"
-        brokerage_sp500_status = "INVESTED"
+        brokerage_sp500_position = "SP500"; brokerage_sp500_status = "INVESTED"
 
-    # ============================
-    # Build Telegram message
-    # ============================
+    # ============ Build new_state for change-line + persistence ============
+    def build_state_record(label, walker_st, exit_threshold, reentry_threshold,
+                           current_position, get_position_fn=None):
+        return {
+            "label": label,
+            "state": walker_st["state"],
+            "position": current_position,
+            "exit_streak": walker_st.get("days_off_streak", walker_st.get("vol_streak", 0)),
+            "exit_threshold": exit_threshold,
+            "reentry_streak": walker_st.get("days_on_streak", walker_st.get("reentry_streak", 0)),
+            "reentry_threshold": reentry_threshold,
+        }
 
-    cur_vol = roth_state["current_vol"]   # same series, same value for both Roth/Brok
-    vol_str = f"{cur_vol*100:.1f}%" if cur_vol is not None else "n/a"
+    # Build current positions per strategy
+    def top7_position(st):
+        if st["state"] == "invested": return "TOP-7 STOCKS"
+        return "TREASURIES" if un_flag_01 else "SP500"
+
+    new_state = {}
+
+    # Top-7: expose BOTH vol and MA paths so change-line can surface either/both
+    new_state["top7_roth"] = {
+        "label": "Top-7 (Roth)", "state": roth_top7_st["state"],
+        "position": top7_position(roth_top7_st),
+        "paths": [
+            ("vol", roth_top7_st["vol_streak"], ROTH_TOP7_PARAMS["E_vol"]),
+            ("MA",  roth_top7_st["ma_streak"],  ROTH_TOP7_PARAMS["E_ma"]),
+        ],
+        "reentry_streak": roth_top7_st["reentry_streak"], "reentry_threshold": ROTH_TOP7_PARAMS["R_re"],
+    }
+    new_state["top7_brok"] = {
+        "label": "Top-7 (Brok)", "state": brok_top7_st["state"],
+        "position": top7_position(brok_top7_st),
+        "paths": [
+            ("vol", brok_top7_st["vol_streak"], BROK_TOP7_PARAMS["E_vol"]),
+            ("MA",  brok_top7_st["ma_streak"],  BROK_TOP7_PARAMS["E_ma"]),
+        ],
+        "reentry_streak": brok_top7_st["reentry_streak"], "reentry_threshold": BROK_TOP7_PARAMS["R_re"],
+    }
+
+    new_state["spy_lev_roth"] = {
+        "label": "SPY Leveraged (Roth)", "state": spy_lev_roth_st["state"],
+        "position": "UPRO" if spy_lev_roth_st["state"] == "invested" else "USFR",
+        "exit_streak": spy_lev_roth_st["days_off_streak"], "exit_threshold": SPY_LEV_ROTH_PARAMS["exit_lag"],
+        "reentry_streak": spy_lev_roth_st["days_on_streak"], "reentry_threshold": SPY_LEV_ROTH_PARAMS["entry_lag"],
+    }
+    new_state["spy_lev_brok"] = {
+        "label": "SPY Leveraged (Brok)", "state": spy_lev_brok_st["state"],
+        "position": "UPRO" if spy_lev_brok_st["state"] == "invested" else "USFR",
+        "exit_streak": spy_lev_brok_st["days_off_streak"], "exit_threshold": SPY_LEV_BROK_PARAMS["exit_lag"],
+        "reentry_streak": spy_lev_brok_st["days_on_streak"], "reentry_threshold": SPY_LEV_BROK_PARAMS["entry_lag"],
+    }
+    if qqq_lev_st is not None:
+        new_state["qqq_lev_roth"] = {
+            "label": "QQQ Leveraged (Roth)", "state": qqq_lev_st["state"],
+            "position": "TQQQ" if qqq_lev_st["state"] == "invested" else "USFR",
+            "exit_streak": qqq_lev_st["days_off_streak"], "exit_threshold": QQQ_LEV_PARAMS["exit_lag"],
+            "reentry_streak": qqq_lev_st["days_on_streak"], "reentry_threshold": QQQ_LEV_PARAMS["entry_lag"],
+        }
+        new_state["qqq_lev_brok"] = dict(new_state["qqq_lev_roth"])
+        new_state["qqq_lev_brok"]["label"] = "QQQ Leveraged (Brok)"
+
+    # ============ Load prev state, compute change-line ============
+    prev = load_state()
+    change_line = build_change_line(prev, new_state)
+
+    # ============ Build the Telegram message ============
+    cur_vol_str = f"{vol30_v*100:.1f}%" if vol30_v is not None else "n/a"
+    spy_vol_str = f"{spy_vol20_v*100:.1f}%" if spy_vol20_v is not None else "n/a"
+    qqq_vol_str = f"{qqq_vol20_v*100:.1f}%" if qqq_vol20_v is not None else "n/a"
+
+    # Stale-data check: if latest SPY close is more than 5 calendar days old,
+    # the bot is computing signals from outdated prices.
+    today_d = date.today()
+    latest_d = latest_date.date() if isinstance(latest_date, pd.Timestamp) else latest_date
+    days_stale = (today_d - latest_d).days
+    stale_warning = None
+    if days_stale > 5:
+        stale_warning = f"⚠️ <b>STALE DATA</b> — most recent close is {latest_d} ({days_stale} calendar days old). Signals may be outdated; verify your data sources before acting."
+
+    # Fallback dates for "for N days" computation when walker has no transition
+    spy_first_date = spy_close.index[0]
+    qqq_first_date = qqq_close.index[0] if qqq_close is not None else spy_first_date
+    unrate_failed = not health["UNRATE"]
 
     lines = []
     lines.append(f"<b>📊 {ACCOUNT_LABEL}</b>")
-    lines.append(f"{latest_date.strftime('%Y-%m-%d')} | SPY: {latest_close:.2f} | NDXcomp vol30: {vol_str}")
-    lines.append(f"SMA50: {sma50_value:.2f} | SMA100: {sma100_value:.2f} | SMA250: {sma250_value:.2f} | SMA300: {sma300_value:.2f}")
-    lines.append(f"UNRATE 3-mo Δ: {un_chg:+.2f}pp ({'rising ⚠️' if un_flag_01 else 'stable'}; tiered_0.1 routing)")
+    lines.append(f"{latest_date.strftime('%Y-%m-%d')}")
+    if stale_warning:
+        lines.append(stale_warning)
+    lines.append(change_line)
     lines.append("")
 
-    # --- ROTH ACCOUNT SECTION ---
+    # Inputs blocks
+    unrate_str = f"{un_chg:+.2f}pp ({'rising ⚠️' if un_flag_01 else 'stable'}; tiered_0.1 routing)" if not unrate_failed else "⚠️ FETCH FAILED — assuming stable"
+    lines.append("<b>Top-7 inputs:</b>")
+    lines.append(f"SPY: {latest_close:.2f} | NASDAQCOM vol30: {cur_vol_str} | "
+                 f"SP500 SMAs: 50:{sma50_v:.2f}, 100:{sma100_v:.2f}, 250:{sma250_v:.2f}, 300:{sma300_v:.2f} | "
+                 f"UNRATE 3-mo Δ: {unrate_str}")
+    lines.append("")
+    lines.append("<b>SPY Leveraged inputs:</b>")
+    lines.append(f"SPY: {latest_close:.2f} | SPY SMA275: {sma275_v:.2f} | SPY vol20: {spy_vol_str} (thr 22%)")
+    lines.append("")
+    if qqq_close is not None:
+        lines.append("<b>QQQ Leveraged inputs:</b>")
+        lines.append(f"QQQ: {qqq_close_v:.2f} | QQQ SMA175: {qqq_sma175_v:.2f} | QQQ vol20: {qqq_vol_str} (thr 30%)")
+        lines.append("")
+
+    # ROTH section
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("<b>🏦 ROTH IRA</b>")
     lines.append("━━━━━━━━━━━━━━━━━━")
-
-    lines.append(f"<b>Top-7 Strategy — ALT-A</b>")
-    lines.append(f"<i>(D-asym MA{ROTH_PARAMS['ma_exit']}/E_ma{ROTH_PARAMS['E_ma']}/MA{ROTH_PARAMS['ma_re']}/R_re{ROTH_PARAMS['R_re']}/vol{int(ROTH_PARAMS['vol_thr']*100)}%/E_vol{ROTH_PARAMS['E_vol']} + tiered_0.1)</i>")
-    lines.append(f"➤ <b>HOLD: {roth_position}</b>")
-
-    if roth_state["state"] == "invested":
-        vol_warn = "⚠️" if roth_state["vol_streak"] > 0 else ""
-        ma_warn = "⚠️" if roth_state["ma_streak"] > 0 else ""
-        lines.append(f"Vol exit watch: {roth_state['vol_streak']}/{ROTH_PARAMS['E_vol']} days NDX vol30 ≥ {int(ROTH_PARAMS['vol_thr']*100)}% {vol_warn}")
-        lines.append(f"MA exit watch:  {roth_state['ma_streak']}/{ROTH_PARAMS['E_ma']} days SPY below SMA{ROTH_PARAMS['ma_exit']} {ma_warn}")
-    else:
-        lines.append(f"Reentry watch: {roth_state['reentry_streak']}/{ROTH_PARAMS['R_re']} days SPY above SMA{ROTH_PARAMS['ma_re']} ⏳")
-        if roth_state["last_transition_date"] is not None:
-            tdate = roth_state["last_transition_date"].strftime("%Y-%m-%d")
-            lines.append(f"<i>Exited {tdate} via {roth_state['last_transition_reason']}</i>")
     lines.append("")
-
-    lines.append(f"<b>SP500 Holdings</b> <i>(MA250 E80 R5)</i>")
-    lines.append(f"➤ <b>HOLD: {roth_sp500_position}</b>")
-    if roth_sp500_status == "INVESTED":
-        status_char = "⚠️" if below_streak_250 > 0 else ""
-        lines.append(f"Exit watch: {below_streak_250}/80 days below SMA250 {status_char}")
-    else:
-        days_above = state_roth_sp500["days_above_since_exit"]
-        lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
+    lines.extend(render_top7_section("Roth", ROTH_TOP7_PARAMS, roth_top7_st,
+                                     spy_first_date, unrate_failed=unrate_failed))
     lines.append("")
+    lines.extend(render_lev_section("SPY Leveraged (Roth)", SPY_LEV_ROTH_PARAMS, spy_lev_roth_st,
+                                    spy_first_date))
+    lines.append("")
+    if qqq_lev_st is not None:
+        lines.extend(render_lev_section("QQQ Leveraged (Roth)", QQQ_LEV_PARAMS, qqq_lev_st,
+                                        qqq_first_date))
+        lines.append("")
+    else:
+        lines.append("<b>QQQ Leveraged (Roth)</b>")
+        lines.append("⚠️ DATA UNAVAILABLE — retain prior position")
+        lines.append("")
 
-    # --- BROKERAGE ACCOUNT SECTION ---
+    # --- LEGACY: SP500 MA250/E80/R5 holdings (Roth) ---
+    # Hidden from Telegram per Apr 2026 leveraged-CB rollout.
+    # Compute logic preserved above; uncomment to re-render.
+    # lines.append(f"<b>SP500 Holdings</b> <i>(MA250 E80 R5)</i>")
+    # lines.append(f"➤ <b>HOLD: {roth_sp500_position}</b>")
+    # if roth_sp500_status == "INVESTED":
+    #     status_char = "⚠️" if below_streak_250 > 0 else ""
+    #     lines.append(f"Exit watch: {below_streak_250}/80 days below SMA250 {status_char}")
+    # else:
+    #     days_above = state_roth_sp500["days_above_since_exit"]
+    #     lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
+    # lines.append("")
+
+    # BROKERAGE section
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("<b>💼 BROKERAGE</b>")
     lines.append("━━━━━━━━━━━━━━━━━━")
-
-    lines.append(f"<b>Top-7 Strategy — BROK_A</b>")
-    lines.append(f"<i>(D-asym MA{BROK_PARAMS['ma_exit']}/E_ma{BROK_PARAMS['E_ma']}/MA{BROK_PARAMS['ma_re']}/R_re{BROK_PARAMS['R_re']}/vol{int(BROK_PARAMS['vol_thr']*100)}%/E_vol{BROK_PARAMS['E_vol']} + tiered_0.1)</i>")
-    lines.append(f"➤ <b>HOLD: {brok_position}</b>")
-
-    if brok_state["state"] == "invested":
-        vol_warn = "⚠️" if brok_state["vol_streak"] > 0 else ""
-        ma_warn = "⚠️" if brok_state["ma_streak"] > 0 else ""
-        lines.append(f"Vol exit watch: {brok_state['vol_streak']}/{BROK_PARAMS['E_vol']} days NDX vol30 ≥ {int(BROK_PARAMS['vol_thr']*100)}% {vol_warn}")
-        lines.append(f"MA exit watch:  {brok_state['ma_streak']}/{BROK_PARAMS['E_ma']} days SPY below SMA{BROK_PARAMS['ma_exit']} {ma_warn}")
-    else:
-        lines.append(f"Reentry watch: {brok_state['reentry_streak']}/{BROK_PARAMS['R_re']} days SPY above SMA{BROK_PARAMS['ma_re']} ⏳")
-        if brok_state["last_transition_date"] is not None:
-            tdate = brok_state["last_transition_date"].strftime("%Y-%m-%d")
-            lines.append(f"<i>Exited {tdate} via {brok_state['last_transition_reason']}</i>")
     lines.append("")
-
-    lines.append(f"<b>SP500 Strategy</b> <i>(MA250 E80 R5)</i>")
-    lines.append(f"➤ <b>HOLD: {brokerage_sp500_position}</b>")
-    if brokerage_sp500_status == "INVESTED":
-        status_char = "⚠️" if below_streak_250 > 0 else ""
-        lines.append(f"Exit watch: {below_streak_250}/80 days below SMA250 {status_char}")
+    lines.extend(render_top7_section("Brok", BROK_TOP7_PARAMS, brok_top7_st,
+                                     spy_first_date, unrate_failed=unrate_failed))
+    lines.append("")
+    lines.extend(render_lev_section("SPY Leveraged (Brok)", SPY_LEV_BROK_PARAMS, spy_lev_brok_st,
+                                    spy_first_date))
+    lines.append("")
+    if qqq_lev_st is not None:
+        lines.extend(render_lev_section("QQQ Leveraged (Brok)", QQQ_LEV_PARAMS, qqq_lev_st,
+                                        qqq_first_date))
+        lines.append("")
     else:
-        days_above = state_brokerage_sp500["days_above_since_exit"]
-        lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
+        lines.append("<b>QQQ Leveraged (Brok)</b>")
+        lines.append("⚠️ DATA UNAVAILABLE — retain prior position")
+        lines.append("")
 
+    # --- LEGACY: SP500 MA250/E80/R5 strategy (Brokerage) ---
+    # Hidden from Telegram per Apr 2026 leveraged-CB rollout.
+    # Compute logic preserved above; uncomment to re-render.
+    # lines.append(f"<b>SP500 Strategy</b> <i>(MA250 E80 R5)</i>")
+    # lines.append(f"➤ <b>HOLD: {brokerage_sp500_position}</b>")
+    # if brokerage_sp500_status == "INVESTED":
+    #     status_char = "⚠️" if below_streak_250 > 0 else ""
+    #     lines.append(f"Exit watch: {below_streak_250}/80 days below SMA250 {status_char}")
+    # else:
+    #     days_above = state_brokerage_sp500["days_above_since_exit"]
+    #     lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
+
+    # Health footer
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    health_bits = []
+    for src, ok in health.items():
+        health_bits.append(f"{src} {'✓' if ok else '✗'}")
+    lines.append(f"📡 Data: {' | '.join(health_bits)}")
+
+    # Send
     send_telegram(bot_token, chat_id, "\n".join(lines))
+
+    # Persist new state (entry dates already populated above)
+    save_state(new_state)
+    print(f"State saved to {STATE_FILE}")
 
 
 if __name__ == "__main__":
