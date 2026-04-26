@@ -559,30 +559,18 @@ def render_lev_section(label: str, params: dict, st: dict, fallback_first_date) 
 # Change-line builder
 # ============================
 
-def build_conditions_line(spy_close, sma275, spy_vol20,
+def build_conditions_line(spy_close, sma275, sma300, spy_vol20,
                            qqq_close, qqq_sma175, qqq_vol20,
                            ndx_vol30, un_chg, un_flag_01, unrate_failed,
                            ndx_stale_days: int = 0) -> str:
     """One-line market conditions snapshot. Always shown under the status.
 
-    Plain language: trend direction (above/below SMA) + volatility level.
-    Flags borderline conditions (within 1.5%/1.5pp of triggering) even when
-    counters are at 0 — important for SPY Lev Roth (e=1) which has no
-    APPROACHING tier.
+    Shows SPY trend vs BOTH long-term MAs (SMA275=SPY Lev exit ref,
+    SMA300=Top-7 exit ref) and QQQ vs SMA175 (Q Lev exit ref). Flags borderline
+    conditions (within 1.5%/1.5pp of triggering) even when counters are at 0.
     """
-    BORDER_PCT = 1.5  # within 1.5% of MA = "approaching"
-    BORDER_VOL = 1.5  # within 1.5pp of vol thr = "approaching"
-
-    def trend_phrase(close, sma, label, ma_n):
-        if pd.isna(close) or pd.isna(sma):
-            return f"{label} (data missing)"
-        gap_pct = (close - sma) / sma * 100
-        if close > sma:
-            if gap_pct < BORDER_PCT:
-                return f"⚠️ {label} only {gap_pct:.1f}% above {ma_n}d MA (approaching)"
-            return f"{label} above {ma_n}d MA"
-        else:
-            return f"⚠️ {label} {-gap_pct:.1f}% BELOW {ma_n}d MA"
+    BORDER_PCT = 1.5
+    BORDER_VOL = 1.5
 
     def vol_phrase(v, thr_pct, label):
         if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -594,13 +582,45 @@ def build_conditions_line(spy_close, sma275, spy_vol20,
             return f"⚠️ {label} {v_pct:.0f}% (approaching {thr_pct}% thr)"
         return f"{label} {v_pct:.0f}%"
 
+    def spy_trend_combined(close, sma_a, label_a, sma_b, label_b):
+        """Show SPY's trend status vs BOTH long-term MAs (Top-7 SMA300 + SPY Lev SMA275)."""
+        if pd.isna(close) or pd.isna(sma_a) or pd.isna(sma_b):
+            return "SPY trend (data missing)"
+        a_above = close > sma_a; b_above = close > sma_b
+        gap_a = (close - sma_a) / sma_a * 100
+        gap_b = (close - sma_b) / sma_b * 100
+        # Both above (calm): "SPY above SMA275 & SMA300"
+        if a_above and b_above:
+            min_gap = min(gap_a, gap_b)
+            if min_gap < BORDER_PCT:
+                return f"⚠️ SPY barely above {label_a} & {label_b} (closest gap {min_gap:.1f}%)"
+            return f"SPY above {label_a} & {label_b}"
+        # Both below (clear bear): "SPY BELOW both SMAs"
+        if not a_above and not b_above:
+            worst = min(gap_a, gap_b)  # most negative
+            return f"⚠️ SPY {-worst:.1f}% BELOW both {label_a} & {label_b}"
+        # Mixed: between the two MAs
+        if a_above and not b_above:
+            return f"⚠️ SPY above {label_a} but BELOW {label_b}"
+        return f"⚠️ SPY above {label_b} but BELOW {label_a}"
+
+    def qqq_trend(close, sma, label_n):
+        if pd.isna(close) or pd.isna(sma):
+            return "QQQ trend (data missing)"
+        gap_pct = (close - sma) / sma * 100
+        if close > sma:
+            if gap_pct < BORDER_PCT:
+                return f"⚠️ QQQ only {gap_pct:.1f}% above SMA{label_n} (approaching)"
+            return f"QQQ above SMA{label_n}"
+        return f"⚠️ QQQ {-gap_pct:.1f}% BELOW SMA{label_n}"
+
     bits = []
-    # SPY: trend + vol
-    if spy_close is not None and sma275 is not None:
-        bits.append(f"{trend_phrase(spy_close, sma275, 'SPY', 275)}, {vol_phrase(spy_vol20, 22, 'vol')}")
-    # QQQ: trend + vol
+    # SPY: combined trend (SMA275 SPY Lev ref + SMA300 Top-7 ref) + vol20 (SPY Lev thr 22%)
+    if spy_close is not None and sma275 is not None and sma300 is not None:
+        bits.append(f"{spy_trend_combined(spy_close, sma275, 'SMA275', sma300, 'SMA300')}, {vol_phrase(spy_vol20, 22, 'SPY vol')}")
+    # QQQ: SMA175 only + vol20 (Q Lev thr 30%)
     if qqq_close is not None and qqq_sma175 is not None:
-        bits.append(f"{trend_phrase(qqq_close, qqq_sma175, 'QQQ', 175)}, {vol_phrase(qqq_vol20, 30, 'vol')}")
+        bits.append(f"{qqq_trend(qqq_close, qqq_sma175, '175')}, {vol_phrase(qqq_vol20, 30, 'QQQ vol')}")
     # NDX vol30 (used by Top-7) — Roth thr 40%, Brok thr 45%
     if ndx_vol30 is not None:
         v_pct = ndx_vol30 * 100
@@ -1032,7 +1052,7 @@ def main():
     # Build top-of-message summary (status + conditions + active items)
     prev = load_state()
     conditions_line = build_conditions_line(
-        spy_close=latest_close, sma275=sma275_v, spy_vol20=spy_vol20_v,
+        spy_close=latest_close, sma275=sma275_v, sma300=sma300_v, spy_vol20=spy_vol20_v,
         qqq_close=qqq_close_v, qqq_sma175=qqq_sma175_v, qqq_vol20=qqq_vol20_v,
         ndx_vol30=vol30_v, un_chg=un_chg, un_flag_01=un_flag_01,
         unrate_failed=unrate_failed, ndx_stale_days=ndx_stale_days,
