@@ -556,7 +556,7 @@ def main():
             lines.append(f"<i>Exited {tdate} via {roth_state['last_transition_reason']}</i>")
     lines.append("")
 
-    lines.append(f"<b>SP500 Holdings (legacy)</b> <i>(MA250 E80 R5)</i>")
+    lines.append(f"<b>SP500 Holdings</b> <i>(MA250 E80 R5)</i>")
     lines.append(f"➤ <b>HOLD: {roth_sp500_position}</b>")
     if roth_sp500_status == "INVESTED":
         status_char = "⚠️" if below_streak_250 > 0 else ""
@@ -587,7 +587,7 @@ def main():
             lines.append(f"<i>Exited {tdate} via {brok_state['last_transition_reason']}</i>")
     lines.append("")
 
-    lines.append(f"<b>SP500 Strategy (legacy)</b> <i>(MA250 E80 R5)</i>")
+    lines.append(f"<b>SP500 Strategy</b> <i>(MA250 E80 R5)</i>")
     lines.append(f"➤ <b>HOLD: {brokerage_sp500_position}</b>")
     if brokerage_sp500_status == "INVESTED":
         status_char = "⚠️" if below_streak_250 > 0 else ""
