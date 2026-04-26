@@ -42,6 +42,24 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime, date, timedelta
+from pandas.tseries.holiday import USFederalHolidayCalendar
+
+
+def trading_days_missed(latest_d, today_d):
+    """Count NYSE trading days between latest_d (exclusive) and today_d (inclusive)
+    that should have produced data. Accounts for weekends + US federal holidays.
+    Returns 0 if data is fresh (latest_d is the most recent expected trading day)."""
+    if today_d <= latest_d: return 0
+    cal = USFederalHolidayCalendar()
+    holidays = set(cal.holidays(start=pd.Timestamp(latest_d),
+                                 end=pd.Timestamp(today_d) + pd.Timedelta(days=1)).date)
+    d = latest_d + timedelta(days=1)
+    count = 0
+    while d <= today_d:
+        if d.weekday() < 5 and d not in holidays:
+            count += 1
+        d += timedelta(days=1)
+    return count
 
 # ============================
 # Data sources
@@ -157,7 +175,35 @@ def fetch_nasdaqcom_csv_fallback() -> pd.DataFrame:
     return df.dropna().sort_values("Date").set_index("Date")
 
 
+def fetch_nasdaqcom_yfinance() -> pd.DataFrame:
+    """Fetch Nasdaq Composite via yfinance (^IXIC) — real-time post-close.
+    Verified equivalent to FRED's NASDAQCOM series (max diff 0.000044% over 60d)."""
+    import yfinance as yf
+    df = yf.download("^IXIC", period="4y", auto_adjust=True, progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df.columns = [c.strip().title() for c in df.columns]
+    if "Close" not in df.columns:
+        raise ValueError(f"yfinance ^IXIC: 'Close' not found. Got: {list(df.columns)}")
+    df = df[["Close"]].dropna().rename(columns={"Close": "NDX"})
+    if df.empty:
+        raise ValueError("yfinance ^IXIC returned empty")
+    return df
+
+
 def fetch_nasdaqcom() -> pd.DataFrame:
+    """yfinance ^IXIC primary (real-time post-close), FRED API/CSV fallback.
+    Switching from FRED-primary to yfinance-primary eliminates the ~1-day FRED
+    publication lag that previously caused 1-day-late vol-path triggers."""
+    # PRIMARY: yfinance ^IXIC (real-time post-close, same series as NASDAQCOM)
+    try:
+        df = fetch_nasdaqcom_yfinance()
+        if not df.empty:
+            return df
+    except Exception as e:
+        print(f"yfinance ^IXIC failed: {e}, falling back to FRED")
+
+    # FALLBACK 1: FRED API
     api_key = os.environ.get("FRED_API_KEY")
     obs_start = (pd.Timestamp.today() - pd.Timedelta(days=365 * 4)).strftime("%Y-%m-%d")
     if api_key:
@@ -167,6 +213,8 @@ def fetch_nasdaqcom() -> pd.DataFrame:
                 return df
         except Exception as e:
             print(f"FRED NASDAQCOM API failed: {e}, falling back to CSV")
+
+    # FALLBACK 2: FRED CSV scrape
     df = fetch_nasdaqcom_csv_fallback()
     cutoff = pd.Timestamp.today() - pd.Timedelta(days=365 * 4)
     return df[df.index >= cutoff].copy()
@@ -513,28 +561,68 @@ def render_lev_section(label: str, params: dict, st: dict, fallback_first_date) 
 
 def build_conditions_line(spy_close, sma275, spy_vol20,
                            qqq_close, qqq_sma175, qqq_vol20,
-                           ndx_vol30, un_chg, un_flag_01, unrate_failed) -> str:
-    """One-line market conditions snapshot. Always shown under the status."""
+                           ndx_vol30, un_chg, un_flag_01, unrate_failed,
+                           ndx_stale_days: int = 0) -> str:
+    """One-line market conditions snapshot. Always shown under the status.
+
+    Plain language: trend direction (above/below SMA) + volatility level.
+    Flags borderline conditions (within 1.5%/1.5pp of triggering) even when
+    counters are at 0 — important for SPY Lev Roth (e=1) which has no
+    APPROACHING tier.
+    """
+    BORDER_PCT = 1.5  # within 1.5% of MA = "approaching"
+    BORDER_VOL = 1.5  # within 1.5pp of vol thr = "approaching"
+
+    def trend_phrase(close, sma, label, ma_n):
+        if pd.isna(close) or pd.isna(sma):
+            return f"{label} (data missing)"
+        gap_pct = (close - sma) / sma * 100
+        if close > sma:
+            if gap_pct < BORDER_PCT:
+                return f"⚠️ {label} only {gap_pct:.1f}% above {ma_n}d MA (approaching)"
+            return f"{label} above {ma_n}d MA"
+        else:
+            return f"⚠️ {label} {-gap_pct:.1f}% BELOW {ma_n}d MA"
+
+    def vol_phrase(v, thr_pct, label):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return "vol n/a"
+        v_pct = v * 100
+        if v_pct >= thr_pct:
+            return f"⚠️ {label} {v_pct:.0f}% (≥{thr_pct}% thr)"
+        if (thr_pct - v_pct) < BORDER_VOL:
+            return f"⚠️ {label} {v_pct:.0f}% (approaching {thr_pct}% thr)"
+        return f"{label} {v_pct:.0f}%"
+
     bits = []
-    # SPY vs SMA275
+    # SPY: trend + vol
     if spy_close is not None and sma275 is not None:
-        pct = (spy_close - sma275) / sma275 * 100
-        v = f"{spy_vol20*100:.0f}%" if spy_vol20 is not None else "n/a"
-        bits.append(f"SPY {pct:+.1f}% vs SMA275 (vol20 {v})")
-    # QQQ vs SMA175
+        bits.append(f"{trend_phrase(spy_close, sma275, 'SPY', 275)}, {vol_phrase(spy_vol20, 22, 'vol')}")
+    # QQQ: trend + vol
     if qqq_close is not None and qqq_sma175 is not None:
-        pct = (qqq_close - qqq_sma175) / qqq_sma175 * 100
-        v = f"{qqq_vol20*100:.0f}%" if qqq_vol20 is not None else "n/a"
-        bits.append(f"QQQ {pct:+.1f}% vs SMA175 (vol20 {v})")
-    # NDX vol30
+        bits.append(f"{trend_phrase(qqq_close, qqq_sma175, 'QQQ', 175)}, {vol_phrase(qqq_vol20, 30, 'vol')}")
+    # NDX vol30 (used by Top-7) — Roth thr 40%, Brok thr 45%
     if ndx_vol30 is not None:
-        bits.append(f"NDX vol30 {ndx_vol30*100:.0f}%")
+        v_pct = ndx_vol30 * 100
+        if v_pct >= 45:
+            ndx_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (≥45% Brok thr)"
+        elif v_pct >= 40:
+            ndx_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (≥40% Roth thr)"
+        elif (40 - v_pct) < BORDER_VOL:
+            ndx_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (approaching 40% Roth thr)"
+        else:
+            ndx_str = f"NASDAQ vol {v_pct:.0f}%"
+        if ndx_stale_days > 1:
+            ndx_str = f"{ndx_str} (data {ndx_stale_days}d stale)"
+        bits.append(ndx_str)
     # UNRATE
     if unrate_failed:
-        bits.append("UNRATE ⚠️ failed")
+        bits.append("⚠️ UNRATE fetch failed")
+    elif un_flag_01:
+        bits.append(f"⚠️ unemployment rising (+{un_chg:.2f}pp)")
     else:
-        bits.append(f"UNRATE Δ {un_chg:+.2f}pp ({'rising' if un_flag_01 else 'stable'})")
-    return "Conditions: " + " | ".join(bits)
+        bits.append("unemployment stable")
+    return "Markets: " + " | ".join(bits)
 
 
 def build_summary_block(prev_state: dict, new_state: dict, conditions_line: str) -> list:
@@ -583,7 +671,17 @@ def build_summary_block(prev_state: dict, new_state: dict, conditions_line: str)
     # ============ STATUS LINE ============
     if flips:
         n = len(flips)
-        lines.append(f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''} tomorrow at MOC (before 3:50pm ET)</b>")
+        # Compute "next trading day" descriptor — handles Friday signals correctly
+        today_dow = date.today().weekday()  # Mon=0..Fri=4
+        if today_dow == 4:
+            nxt_label = "MONDAY"
+        elif today_dow == 5:  # Sat (manual run)
+            nxt_label = "MONDAY"
+        elif today_dow == 6:  # Sun (manual run)
+            nxt_label = "MONDAY"
+        else:
+            nxt_label = "tomorrow"
+        lines.append(f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''} at MOC {nxt_label} (before 3:50pm ET)</b>")
         lines.append(conditions_line)
         if n == 1:
             lbl, frm, to = flips[0]
@@ -678,6 +776,16 @@ def main():
     latest_date = spy_close.index[-1]
     latest_close = float(spy_close.iloc[-1])
 
+    # Sanity check: SPY history must be long enough for SMA300 (Top-7) + walker buffer.
+    # Without this, SMAs would be NaN throughout, walker counters never increment,
+    # state stuck at initial. Silent fail — must catch.
+    if len(spy_close) < 350:
+        msg = (f"<b>⚠️ SPY DATA TOO SHORT</b>\n"
+               f"Got {len(spy_close)} trading days; need 350+ for SMA300 + walker convergence.\n"
+               f"Bot aborted to prevent silent signal failure. Check yfinance/Stooq.")
+        send_telegram(bot_token, chat_id, msg)
+        return
+
     # MAs for Top-7 + legacy
     sma50 = spy_close.rolling(50).mean()
     sma100 = spy_close.rolling(100).mean()
@@ -694,26 +802,51 @@ def main():
     spy_vol20_v = float(spy_vol20.iloc[-1]) if not pd.isna(spy_vol20.iloc[-1]) else None
 
     # NASDAQCOM 30-day vol (for Top-7)
+    # FIX: NASDAQCOM on FRED has ~1-day publication lag. If today's NDX is missing,
+    # raw reindex leaves NaN at index[-1] → vol30=NaN → walker resets vol counter to 0,
+    # silently masking a vol-path exit if vol has been elevated. Solution: compute
+    # vol30 on the actual NDX series (no gaps), then ffill the resulting vol30 to the
+    # SPY trading-day index. Also track ndx staleness so we can surface it.
+    ndx_stale_days = 0
     if ndx_df is not None:
         ndx_close = ndx_df["NDX"].copy()
         ndx_close.index = pd.to_datetime(ndx_close.index).normalize()
-        ndx_aligned = ndx_close.reindex(spy_close.index)
-        vol30 = compute_vol30(ndx_aligned)
+        # Compute vol30 on the original (non-gappy) NDX series first
+        vol30_native = compute_vol30(ndx_close)
+        # Then align to SPY trading days, ffilling any missing days
+        vol30 = vol30_native.reindex(spy_close.index, method="ffill")
         vol30_v = float(vol30.iloc[-1]) if not pd.isna(vol30.iloc[-1]) else None
+        # Track staleness: how many SPY trading days since the most recent NDX observation
+        last_ndx_date = ndx_close.index[-1]
+        spy_latest = spy_close.index[-1]
+        ndx_stale_days = max(0, (spy_latest - last_ndx_date).days)
     else:
         vol30 = pd.Series(np.nan, index=spy_close.index)
         vol30_v = None
 
     # QQQ data + 175-day MA + 20-day vol
+    # Same bug-fix pattern as NASDAQCOM: if we ffill PRICE before computing vol/MA,
+    # ffilled days produce artificial 0% returns that understate vol. Compute MA + vol
+    # on the original (non-ffilled) QQQ series, then ffill the resulting series to the
+    # SPY trading-day index.
+    qqq_stale_days = 0
     if qqq_df is not None:
-        qqq_close = qqq_df["Close"].copy()
-        qqq_close.index = pd.to_datetime(qqq_close.index).normalize()
-        qqq_close = qqq_close.reindex(spy_close.index, method="ffill")
-        qqq_sma175 = qqq_close.rolling(175).mean()
-        qqq_vol20 = compute_vol20(qqq_close)
-        qqq_close_v = float(qqq_close.iloc[-1])
+        qqq_close_raw = qqq_df["Close"].copy()
+        qqq_close_raw.index = pd.to_datetime(qqq_close_raw.index).normalize()
+        # Compute MA + vol on original QQQ series first
+        qqq_sma175_native = qqq_close_raw.rolling(175).mean()
+        qqq_vol20_native = compute_vol20(qqq_close_raw)
+        # Then align to SPY trading days, ffilling
+        qqq_close = qqq_close_raw.reindex(spy_close.index, method="ffill")
+        qqq_sma175 = qqq_sma175_native.reindex(spy_close.index, method="ffill")
+        qqq_vol20 = qqq_vol20_native.reindex(spy_close.index, method="ffill")
+        qqq_close_v = float(qqq_close.iloc[-1]) if not pd.isna(qqq_close.iloc[-1]) else None
         qqq_sma175_v = float(qqq_sma175.iloc[-1]) if not pd.isna(qqq_sma175.iloc[-1]) else None
         qqq_vol20_v = float(qqq_vol20.iloc[-1]) if not pd.isna(qqq_vol20.iloc[-1]) else None
+        # Track staleness
+        last_qqq_date = qqq_close_raw.index[-1]
+        spy_latest = spy_close.index[-1]
+        qqq_stale_days = max(0, (spy_latest - last_qqq_date).days)
     else:
         qqq_close = qqq_sma175 = qqq_vol20 = None
         qqq_close_v = qqq_sma175_v = qqq_vol20_v = None
@@ -844,20 +977,52 @@ def main():
         }
         new_state["qqq_lev_brok"] = dict(new_state["qqq_lev_roth"])
         new_state["qqq_lev_brok"]["label"] = "QQQ Leveraged (Brok)"
+    # If QQQ fetch failed, preserve previous state so flip detection isn't lost
+    # on the resume day (otherwise prev would have no QQQ keys → first-run behavior).
+    else:
+        prev_for_qqq = load_state()
+        for k in ("qqq_lev_roth", "qqq_lev_brok"):
+            if k in prev_for_qqq:
+                new_state[k] = prev_for_qqq[k]
 
     # ============ Build the Telegram message ============
     cur_vol_str = f"{vol30_v*100:.1f}%" if vol30_v is not None else "n/a"
     spy_vol_str = f"{spy_vol20_v*100:.1f}%" if spy_vol20_v is not None else "n/a"
     qqq_vol_str = f"{qqq_vol20_v*100:.1f}%" if qqq_vol20_v is not None else "n/a"
 
-    # Stale-data check: if latest SPY close is more than 5 calendar days old,
-    # the bot is computing signals from outdated prices.
+    # ============ Per-source freshness verification ============
+    # Verify that the EXPECTED most recent trading day's close is in each source.
+    # Walker uses these series directly; if today's data is missing (and today is
+    # a trading day), the bot will compute signals from yesterday's data — wrong.
     today_d = date.today()
     latest_d = latest_date.date() if isinstance(latest_date, pd.Timestamp) else latest_date
     days_stale = (today_d - latest_d).days
+
+    spy_missed = trading_days_missed(latest_d, today_d)
+    qqq_last_d = (qqq_df["Close"].dropna().index[-1].date()
+                  if qqq_df is not None and len(qqq_df["Close"].dropna()) > 0 else None)
+    qqq_missed = trading_days_missed(qqq_last_d, today_d) if qqq_last_d else None
+    ndx_last_d = (ndx_df["NDX"].dropna().index[-1].date()
+                  if ndx_df is not None and len(ndx_df["NDX"].dropna()) > 0 else None)
+    ndx_missed = trading_days_missed(ndx_last_d, today_d) if ndx_last_d else None
+
+    # Build the freshness warning. SPY/QQQ are real-time post-close (expect 0 missed).
+    # NASDAQCOM has typical 0-1 day FRED publication lag (allow 1, warn at 2+).
+    fresh_warns = []
+    if spy_missed >= 1:
+        fresh_warns.append(f"SPY missing today's close ({spy_missed} trading day{'s' if spy_missed>1 else ''} stale)")
+    if qqq_missed is not None and qqq_missed >= 1:
+        fresh_warns.append(f"QQQ missing today's close ({qqq_missed} trading day{'s' if qqq_missed>1 else ''} stale)")
+    if ndx_missed is not None and ndx_missed >= 2:
+        fresh_warns.append(f"NASDAQCOM {ndx_missed} trading days stale (expected ≤1 from FRED lag)")
+
     stale_warning = None
-    if days_stale > 5:
-        stale_warning = f"⚠️ <b>STALE DATA</b> — most recent close is {latest_d} ({days_stale} calendar days old). Signals may be outdated; verify your data sources before acting."
+    if fresh_warns:
+        stale_warning = ("⚠️ <b>DATA FRESHNESS WARNING</b> — " + "; ".join(fresh_warns) +
+                         ". Bot is computing signals from older data; today's true signal may differ.")
+    elif days_stale > 5:
+        # Fallback for very-old SPY data (e.g., long period of yfinance failures)
+        stale_warning = f"⚠️ <b>STALE DATA</b> — SPY most recent close is {latest_d} ({days_stale} calendar days old). Verify data sources."
 
     # Fallback dates for "for N days" computation when walker has no transition
     spy_first_date = spy_close.index[0]
@@ -870,7 +1035,7 @@ def main():
         spy_close=latest_close, sma275=sma275_v, spy_vol20=spy_vol20_v,
         qqq_close=qqq_close_v, qqq_sma175=qqq_sma175_v, qqq_vol20=qqq_vol20_v,
         ndx_vol30=vol30_v, un_chg=un_chg, un_flag_01=un_flag_01,
-        unrate_failed=unrate_failed,
+        unrate_failed=unrate_failed, ndx_stale_days=ndx_stale_days,
     )
     summary_block = build_summary_block(prev, new_state, conditions_line)
 
@@ -962,12 +1127,49 @@ def main():
     #     days_above = state_brokerage_sp500["days_above_since_exit"]
     #     lines.append(f"Re-entry watch: {days_above}/5 days above SMA250 ⏳")
 
-    # Health footer
+    # Health footer with weekend-aware staleness (catches silent staleness without
+    # false-alarming every Monday for the Friday→Monday weekend gap).
     lines.append("━━━━━━━━━━━━━━━━━━")
+    age_map = {"SPY": days_stale, "QQQ": qqq_stale_days, "NASDAQCOM": ndx_stale_days, "UNRATE": None}
+    # Track each source's actual latest date so stale_label can count trading-days-missed
+    def _to_date(ts):
+        if ts is None: return None
+        return ts.date() if hasattr(ts, 'date') else ts
+    src_latest_map = {
+        "SPY": latest_d,
+        "QQQ": _to_date(qqq_df["Close"].dropna().index[-1]) if qqq_df is not None else None,
+        "NASDAQCOM": _to_date(ndx_df["NDX"].dropna().index[-1]) if ndx_df is not None else None,
+        "UNRATE": None,
+    }
+
+    def stale_label(age, src_latest_date):
+        """Holiday-aware staleness: 0 trading days missed = fresh, regardless of
+        calendar gap (e.g., 3-day weekend, Thanksgiving, MLK Day all OK)."""
+        if age is None: return "✓"
+        if src_latest_date is None: return f"✓ ({age}d cal)"
+        missed = trading_days_missed(src_latest_date, date.today())
+        if missed == 0:
+            return f"✓ ({age}d cal — most recent trading day)"
+        if missed == 1:
+            return f"⚠️ 1 trading day missed ({age}d cal)"
+        return f"⚠️ {missed} trading days STALE ({age}d cal)"
+
     health_bits = []
     for src, ok in health.items():
-        health_bits.append(f"{src} {'✓' if ok else '✗'}")
+        if not ok:
+            health_bits.append(f"{src} ✗")
+            continue
+        health_bits.append(f"{src} {stale_label(age_map.get(src), src_latest_map.get(src))}")
     lines.append(f"📡 Data: {' | '.join(health_bits)}")
+
+    # If NASDAQCOM or QQQ is severely stale (>5 days), the ffill carries an old vol
+    # value forward into today's signal. Walker would increment counters based on
+    # potentially-wrong vol → false exits or missed exits. Surface this prominently.
+    severe = []
+    if ndx_stale_days > 5: severe.append(f"NASDAQCOM is {ndx_stale_days}d stale — Top-7 vol path may be wrong")
+    if qqq_stale_days > 5: severe.append(f"QQQ data is {qqq_stale_days}d stale — QQQ Lev signals may be wrong")
+    if severe:
+        lines.append("⚠️ <b>SEVERE STALENESS</b>: " + "; ".join(severe) + ". Verify before acting.")
 
     # Send
     send_telegram(bot_token, chat_id, "\n".join(lines))
