@@ -3,21 +3,39 @@
     "label": "Top-7 (Roth)",
     "state": "invested",
     "position": "TOP-7 STOCKS",
-    "exit_streak": 0,
-    "exit_threshold": 10,
-    "reentry_streak": 12,
-    "reentry_threshold": 5,
-    "entry_date": "2026-04-27"
+    "paths": [
+      [
+        "vol",
+        0,
+        10
+      ],
+      [
+        "MA",
+        0,
+        50
+      ]
+    ],
+    "reentry_streak": 13,
+    "reentry_threshold": 5
   },
   "top7_brok": {
     "label": "Top-7 (Brok)",
     "state": "invested",
     "position": "TOP-7 STOCKS",
-    "exit_streak": 0,
-    "exit_threshold": 25,
-    "reentry_streak": 12,
-    "reentry_threshold": 5,
-    "entry_date": "2026-04-27"
+    "paths": [
+      [
+        "vol",
+        0,
+        25
+      ],
+      [
+        "MA",
+        0,
+        50
+      ]
+    ],
+    "reentry_streak": 13,
+    "reentry_threshold": 5
   },
   "spy_lev_roth": {
     "label": "SPY Leveraged (Roth)",
@@ -25,9 +43,8 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 227,
-    "reentry_threshold": 10,
-    "entry_date": "2026-04-27"
+    "reentry_streak": 228,
+    "reentry_threshold": 10
   },
   "spy_lev_brok": {
     "label": "SPY Leveraged (Brok)",
@@ -35,9 +52,8 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 227,
-    "reentry_threshold": 10,
-    "entry_date": "2026-04-27"
+    "reentry_streak": 228,
+    "reentry_threshold": 10
   },
   "qqq_lev_roth": {
     "label": "QQQ Leveraged (Roth)",
@@ -45,9 +61,8 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 11,
-    "reentry_threshold": 2,
-    "entry_date": "2026-04-27"
+    "reentry_streak": 12,
+    "reentry_threshold": 2
   },
   "qqq_lev_brok": {
     "label": "QQQ Leveraged (Brok)",
@@ -55,8 +70,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 11,
-    "reentry_threshold": 2,
-    "entry_date": "2026-04-27"
+    "reentry_streak": 12,
+    "reentry_threshold": 2
   }
 }
