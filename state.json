@@ -15,7 +15,7 @@
         50
       ]
     ],
-    "reentry_streak": 21,
+    "reentry_streak": 22,
     "reentry_threshold": 5
   },
   "top7_brok": {
@@ -34,7 +34,7 @@
         50
       ]
     ],
-    "reentry_streak": 21,
+    "reentry_streak": 22,
     "reentry_threshold": 5
   },
   "spy_lev_roth": {
@@ -43,7 +43,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 236,
+    "reentry_streak": 237,
     "reentry_threshold": 10
   },
   "spy_lev_brok": {
@@ -52,7 +52,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 236,
+    "reentry_streak": 237,
     "reentry_threshold": 10
   },
   "qqq_lev_roth": {
@@ -61,7 +61,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 20,
+    "reentry_streak": 21,
     "reentry_threshold": 2
   },
   "qqq_lev_brok": {
@@ -70,7 +70,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 20,
+    "reentry_streak": 21,
     "reentry_threshold": 2
   }
 }
