@@ -8,7 +8,7 @@ Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
       pending-execution clarifier. Avoids implying the new asset is held today.
 
   Bug fixes (audit, 2026-04-27):
-    + NASDAQCOM ffill bug — vol30 now computed on raw native NDX series, then
+    + NASDAQCOM ffill bug — vol30 now computed on raw native NASDAQCOM series, then
       ffilled onto SPY trading days. Previously ffilled prices first → fake
       0% returns understated vol when FRED published 1 day late.
     + QQQ ffill bug — same pattern, same fix for vol20 and SMA175.
@@ -25,7 +25,7 @@ Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
     + Action wording: 'MOC tomorrow' / 'MOC MONDAY (before 3:50pm ET)'
       with explicit 'SELL X, BUY Y'.
     + UNRATE-fetch-failure made visible in Top-7 routing line + Markets line.
-    + Severe staleness banner if NDX/QQQ >5 days stale.
+    + Severe staleness banner if NASDAQCOM/QQQ >5 days stale.
     + Health footer upgraded from ✓/✗ to 'most recent trading day' /
       'N trading days STALE' detail.
     + NASDAQCOM source: yfinance ^IXIC primary (real-time post-close), FRED
@@ -160,7 +160,7 @@ def fetch_nasdaqcom_yfinance() -> pd.DataFrame:
     df.columns = [c.strip().title() for c in df.columns]
     if "Close" not in df.columns:
         raise ValueError(f"yfinance ^IXIC: 'Close' not found")
-    df = df[["Close"]].dropna().rename(columns={"Close": "NDX"})
+    df = df[["Close"]].dropna().rename(columns={"Close": "NASDAQCOM"})
     if df.empty:
         raise ValueError("yfinance ^IXIC returned empty")
     return df
@@ -178,7 +178,7 @@ def fetch_nasdaqcom_fred_api(api_key, observation_start=None) -> pd.DataFrame:
         d, v = obs.get("date"), obs.get("value")
         if d and v and v != ".":
             try:
-                records.append({"Date": pd.to_datetime(d), "NDX": float(v)})
+                records.append({"Date": pd.to_datetime(d), "NASDAQCOM": float(v)})
             except (ValueError, TypeError):
                 continue
     return pd.DataFrame(records).sort_values("Date").set_index("Date")
@@ -188,9 +188,9 @@ def fetch_nasdaqcom_csv_fallback() -> pd.DataFrame:
     url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
     df = pd.read_csv(url)
     date_col = "DATE" if "DATE" in df.columns else "observation_date"
-    df = df.rename(columns={date_col: "Date", "NASDAQCOM": "NDX"})
+    df = df.rename(columns={date_col: "Date", "NASDAQCOM": "NASDAQCOM"})
     df["Date"] = pd.to_datetime(df["Date"])
-    df["NDX"] = pd.to_numeric(df["NDX"], errors="coerce")
+    df["NASDAQCOM"] = pd.to_numeric(df["NASDAQCOM"], errors="coerce")
     return df.dropna().sort_values("Date").set_index("Date")
 
 
@@ -253,8 +253,8 @@ def fetch_unrate() -> pd.DataFrame:
 # Vol calculations
 # ============================
 
-def compute_vol30(ndx_series: pd.Series) -> pd.Series:
-    return ndx_series.pct_change().rolling(30, min_periods=30).std() * np.sqrt(252)
+def compute_vol30(nasdaqcom_series: pd.Series) -> pd.Series:
+    return nasdaqcom_series.pct_change().rolling(30, min_periods=30).std() * np.sqrt(252)
 
 
 def compute_vol20(price_series: pd.Series) -> pd.Series:
@@ -485,8 +485,8 @@ def render_lev_section(label, params, st, fallback_first_date,
 
 def build_conditions_line(spy_close, sma100, sma275, sma300, spy_vol20,
                            qqq_close, qqq_sma175, qqq_vol20,
-                           ndx_vol30, un_chg, un_flag_01, unrate_failed,
-                           ndx_stale_days=0):
+                           nasdaqcom_vol30, un_chg, un_flag_01, unrate_failed,
+                           nasdaqcom_stale_days=0):
     BORDER_PCT = 1.5
     BORDER_VOL = 1.5
 
@@ -535,14 +535,14 @@ def build_conditions_line(spy_close, sma100, sma275, sma300, spy_vol20,
         bits.append(f"{spy_trend_summary(spy_close, smas)}, {vol_phrase(spy_vol20, 22, 'SPY vol')}")
     if qqq_close is not None and qqq_sma175 is not None:
         bits.append(f"{qqq_trend(qqq_close, qqq_sma175, '175')}, {vol_phrase(qqq_vol20, 30, 'QQQ vol')}")
-    if ndx_vol30 is not None:
-        v_pct = ndx_vol30 * 100
-        if v_pct >= 45: ndx_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (≥45% Brok thr)"
-        elif v_pct >= 40: ndx_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (≥40% Roth thr)"
-        elif (40 - v_pct) < BORDER_VOL: ndx_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (approaching 40% Roth thr)"
-        else: ndx_str = f"NASDAQ vol {v_pct:.0f}%"
-        if ndx_stale_days > 1: ndx_str = f"{ndx_str} (data {ndx_stale_days}d stale)"
-        bits.append(ndx_str)
+    if nasdaqcom_vol30 is not None:
+        v_pct = nasdaqcom_vol30 * 100
+        if v_pct >= 45: nasdaqcom_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (≥45% Brok thr)"
+        elif v_pct >= 40: nasdaqcom_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (≥40% Roth thr)"
+        elif (40 - v_pct) < BORDER_VOL: nasdaqcom_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (approaching 40% Roth thr)"
+        else: nasdaqcom_str = f"NASDAQ vol {v_pct:.0f}%"
+        if nasdaqcom_stale_days > 1: nasdaqcom_str = f"{nasdaqcom_str} (data {nasdaqcom_stale_days}d stale)"
+        bits.append(nasdaqcom_str)
     if unrate_failed:
         bits.append("⚠️ UNRATE fetch failed")
     elif un_flag_01:
@@ -649,9 +649,9 @@ def main():
     except Exception as e:
         print(f"WARN: QQQ fetch failed: {e}"); qqq_df = None
     try:
-        ndx_df = fetch_nasdaqcom(); health["NASDAQCOM"] = True
+        nasdaqcom_df = fetch_nasdaqcom(); health["NASDAQCOM"] = True
     except Exception as e:
-        print(f"WARN: NASDAQCOM fetch failed: {e}"); ndx_df = None
+        print(f"WARN: NASDAQCOM fetch failed: {e}"); nasdaqcom_df = None
     try:
         un = fetch_unrate(); health["UNRATE"] = True
     except Exception as e:
@@ -681,16 +681,16 @@ def main():
     spy_vol20 = compute_vol20(spy_close)
     spy_vol20_v = float(spy_vol20.iloc[-1]) if not pd.isna(spy_vol20.iloc[-1]) else None
 
-    # NASDAQCOM vol30: compute on NATIVE NDX series, then ffill onto SPY trading days
+    # NASDAQCOM vol30: compute on NATIVE NASDAQCOM series, then ffill onto SPY trading days
     # (avoids the bug where ffilling the price series creates artificial 0% returns)
-    ndx_stale_days = 0
-    if ndx_df is not None:
-        ndx_close = ndx_df["NDX"].copy()
-        ndx_close.index = pd.to_datetime(ndx_close.index).normalize()
-        vol30_native = compute_vol30(ndx_close)
+    nasdaqcom_stale_days = 0
+    if nasdaqcom_df is not None:
+        nasdaqcom_close = nasdaqcom_df["NASDAQCOM"].copy()
+        nasdaqcom_close.index = pd.to_datetime(nasdaqcom_close.index).normalize()
+        vol30_native = compute_vol30(nasdaqcom_close)
         vol30 = vol30_native.reindex(spy_close.index, method="ffill")
         vol30_v = float(vol30.iloc[-1]) if not pd.isna(vol30.iloc[-1]) else None
-        ndx_stale_days = max(0, (spy_close.index[-1] - ndx_close.index[-1]).days)
+        nasdaqcom_stale_days = max(0, (spy_close.index[-1] - nasdaqcom_close.index[-1]).days)
     else:
         vol30 = pd.Series(np.nan, index=spy_close.index); vol30_v = None
 
@@ -805,16 +805,16 @@ def main():
     spy_missed = trading_days_missed(latest_d, today_d)
     qqq_last_d = (qqq_df["Close"].dropna().index[-1].date() if qqq_df is not None and len(qqq_df["Close"].dropna()) else None)
     qqq_missed = trading_days_missed(qqq_last_d, today_d) if qqq_last_d else None
-    ndx_last_d = (ndx_df["NDX"].dropna().index[-1].date() if ndx_df is not None and len(ndx_df["NDX"].dropna()) else None)
-    ndx_missed = trading_days_missed(ndx_last_d, today_d) if ndx_last_d else None
+    nasdaqcom_last_d = (nasdaqcom_df["NASDAQCOM"].dropna().index[-1].date() if nasdaqcom_df is not None and len(nasdaqcom_df["NASDAQCOM"].dropna()) else None)
+    nasdaqcom_missed = trading_days_missed(nasdaqcom_last_d, today_d) if nasdaqcom_last_d else None
 
     fresh_warns = []
     if spy_missed >= 1:
         fresh_warns.append(f"SPY missing today's close ({spy_missed} trading day{'s' if spy_missed>1 else ''} stale)")
     if qqq_missed is not None and qqq_missed >= 1:
         fresh_warns.append(f"QQQ missing today's close ({qqq_missed} trading day{'s' if qqq_missed>1 else ''} stale)")
-    if ndx_missed is not None and ndx_missed >= 2:
-        fresh_warns.append(f"NASDAQCOM {ndx_missed} trading days stale")
+    if nasdaqcom_missed is not None and nasdaqcom_missed >= 2:
+        fresh_warns.append(f"NASDAQCOM {nasdaqcom_missed} trading days stale")
 
     stale_warning = None
     if fresh_warns:
@@ -831,8 +831,8 @@ def main():
         spy_close=latest_close, sma100=sma100_v, sma275=sma275_v, sma300=sma300_v,
         spy_vol20=spy_vol20_v,
         qqq_close=qqq_close_v, qqq_sma175=qqq_sma175_v, qqq_vol20=qqq_vol20_v,
-        ndx_vol30=vol30_v, un_chg=un_chg, un_flag_01=un_flag_01,
-        unrate_failed=unrate_failed, ndx_stale_days=ndx_stale_days)
+        nasdaqcom_vol30=vol30_v, un_chg=un_chg, un_flag_01=un_flag_01,
+        unrate_failed=unrate_failed, nasdaqcom_stale_days=nasdaqcom_stale_days)
     summary_block = build_summary_block(prev, new_state, conditions_line)
 
     lines = [f"<b>📊 {ACCOUNT_LABEL}</b>", f"{latest_date.strftime('%Y-%m-%d')}"]
@@ -909,14 +909,14 @@ def main():
 
     # Health footer with holiday-aware staleness
     lines.append("━━━━━━━━━━━━━━━━━━")
-    age_map = {"SPY": days_stale, "QQQ": qqq_stale_days, "NASDAQCOM": ndx_stale_days, "UNRATE": None}
+    age_map = {"SPY": days_stale, "QQQ": qqq_stale_days, "NASDAQCOM": nasdaqcom_stale_days, "UNRATE": None}
     def _to_date(ts):
         if ts is None: return None
         return ts.date() if hasattr(ts, "date") else ts
     src_latest_map = {
         "SPY": latest_d,
         "QQQ": _to_date(qqq_df["Close"].dropna().index[-1]) if qqq_df is not None else None,
-        "NASDAQCOM": _to_date(ndx_df["NDX"].dropna().index[-1]) if ndx_df is not None else None,
+        "NASDAQCOM": _to_date(nasdaqcom_df["NASDAQCOM"].dropna().index[-1]) if nasdaqcom_df is not None else None,
         "UNRATE": None,
     }
     def stale_label(age, src_latest_date):
@@ -934,7 +934,7 @@ def main():
     lines.append(f"📡 Data: {' | '.join(health_bits)}")
 
     severe = []
-    if ndx_stale_days > 5: severe.append(f"NASDAQCOM is {ndx_stale_days}d stale — Top-7 vol path may be wrong")
+    if nasdaqcom_stale_days > 5: severe.append(f"NASDAQCOM is {nasdaqcom_stale_days}d stale — Top-7 vol path may be wrong")
     if qqq_stale_days > 5: severe.append(f"QQQ data is {qqq_stale_days}d stale — QQQ Lev signals may be wrong")
     if severe:
         lines.append("⚠️ <b>SEVERE STALENESS</b>: " + "; ".join(severe) + ". Verify before acting.")
