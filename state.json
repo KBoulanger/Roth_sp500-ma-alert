@@ -15,7 +15,7 @@
         50
       ]
     ],
-    "reentry_streak": 50,
+    "reentry_streak": 51,
     "reentry_threshold": 5
   },
   "top7_brok": {
@@ -34,7 +34,7 @@
         50
       ]
     ],
-    "reentry_streak": 50,
+    "reentry_streak": 51,
     "reentry_threshold": 5
   },
   "spy_lev_roth": {
@@ -43,7 +43,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 265,
+    "reentry_streak": 266,
     "reentry_threshold": 10
   },
   "spy_lev_brok": {
@@ -52,25 +52,25 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 265,
+    "reentry_streak": 266,
     "reentry_threshold": 10
   },
   "qqq_lev_roth": {
     "label": "QQQ Leveraged (Roth)",
     "state": "invested",
     "position": "TQQQ",
-    "exit_streak": 0,
+    "exit_streak": 1,
     "exit_threshold": 2,
-    "reentry_streak": 49,
+    "reentry_streak": 0,
     "reentry_threshold": 2
   },
   "qqq_lev_brok": {
     "label": "QQQ Leveraged (Brok)",
     "state": "invested",
     "position": "TQQQ",
-    "exit_streak": 0,
+    "exit_streak": 1,
     "exit_threshold": 2,
-    "reentry_streak": 49,
+    "reentry_streak": 0,
     "reentry_threshold": 2
   }
 }
