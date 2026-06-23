@@ -490,15 +490,23 @@ def build_conditions_line(spy_close, sma100, sma275, sma300, spy_vol20,
     BORDER_PCT = 1.5
     BORDER_VOL = 1.5
 
+    def fmt_vol_pct(v_pct, threshold_pct=None):
+        """Show extra precision when rounded whole percentages could obscure a threshold.
+        Example: 29.982% should not display as 30% next to a 30% trigger."""
+        if threshold_pct is not None and abs(v_pct - threshold_pct) < 0.5:
+            return f"{v_pct:.2f}%"
+        return f"{v_pct:.1f}%"
+
     def vol_phrase(v, thr_pct, label):
         if v is None or (isinstance(v, float) and pd.isna(v)):
             return "vol n/a"
         v_pct = v * 100
+        v_str = fmt_vol_pct(v_pct, thr_pct)
         if v_pct >= thr_pct:
-            return f"⚠️ {label} {v_pct:.0f}% (≥{thr_pct}% thr)"
+            return f"⚠️ {label} {v_str} (≥{thr_pct}% thr)"
         if (thr_pct - v_pct) < BORDER_VOL:
-            return f"⚠️ {label} {v_pct:.0f}% (approaching {thr_pct}% thr)"
-        return f"{label} {v_pct:.0f}%"
+            return f"⚠️ {label} {v_str} (approaching {thr_pct}% thr)"
+        return f"{label} {v_str}"
 
     def spy_trend_summary(close, smas_with_labels):
         if pd.isna(close) or any(pd.isna(s) for s, _ in smas_with_labels):
@@ -537,10 +545,10 @@ def build_conditions_line(spy_close, sma100, sma275, sma300, spy_vol20,
         bits.append(f"{qqq_trend(qqq_close, qqq_sma175, '175')}, {vol_phrase(qqq_vol20, 30, 'QQQ vol')}")
     if nasdaqcom_vol30 is not None:
         v_pct = nasdaqcom_vol30 * 100
-        if v_pct >= 45: nasdaqcom_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (≥45% Brok thr)"
-        elif v_pct >= 40: nasdaqcom_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (≥40% Roth thr)"
-        elif (40 - v_pct) < BORDER_VOL: nasdaqcom_str = f"⚠️ NASDAQ vol {v_pct:.0f}% (approaching 40% Roth thr)"
-        else: nasdaqcom_str = f"NASDAQ vol {v_pct:.0f}%"
+        if v_pct >= 45: nasdaqcom_str = f"⚠️ NASDAQ vol {fmt_vol_pct(v_pct, 45)} (≥45% Brok thr)"
+        elif v_pct >= 40: nasdaqcom_str = f"⚠️ NASDAQ vol {fmt_vol_pct(v_pct, 40)} (≥40% Roth thr)"
+        elif (40 - v_pct) < BORDER_VOL: nasdaqcom_str = f"⚠️ NASDAQ vol {fmt_vol_pct(v_pct, 40)} (approaching 40% Roth thr)"
+        else: nasdaqcom_str = f"NASDAQ vol {fmt_vol_pct(v_pct)}"
         if nasdaqcom_stale_days > 1: nasdaqcom_str = f"{nasdaqcom_str} (data {nasdaqcom_stale_days}d stale)"
         bits.append(nasdaqcom_str)
     if unrate_failed:
@@ -842,9 +850,17 @@ def main():
     lines.append("")
 
     # Inputs blocks
-    cur_vol_str = f"{vol30_v*100:.1f}%" if vol30_v is not None else "n/a"
-    spy_vol_str = f"{spy_vol20_v*100:.1f}%" if spy_vol20_v is not None else "n/a"
-    qqq_vol_str = f"{qqq_vol20_v*100:.1f}%" if qqq_vol20_v is not None else "n/a"
+    def fmt_input_vol(v, threshold_pct=None):
+        if v is None:
+            return "n/a"
+        v_pct = v * 100
+        if threshold_pct is not None and abs(v_pct - threshold_pct) < 0.5:
+            return f"{v_pct:.2f}%"
+        return f"{v_pct:.1f}%"
+
+    cur_vol_str = fmt_input_vol(vol30_v)
+    spy_vol_str = fmt_input_vol(spy_vol20_v, 22)
+    qqq_vol_str = fmt_input_vol(qqq_vol20_v, 30)
     unrate_str = (f"{un_chg:+.2f}pp ({'rising ⚠️' if un_flag_01 else 'stable'}; tiered_0.1 routing)"
                    if not unrate_failed else "⚠️ FETCH FAILED — assuming stable")
     lines.append("<b>Top-7 inputs:</b>")
