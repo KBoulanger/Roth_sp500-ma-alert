@@ -55,6 +55,18 @@ from datetime import datetime, date, timedelta
 from pandas.tseries.holiday import USFederalHolidayCalendar
 
 
+def today_et():
+    """Current calendar date in America/New_York.
+
+    GitHub Actions runners use UTC. Manual runs after 8pm ET during daylight
+    time are already the next UTC date, which can make the bot falsely expect
+    tomorrow's market close. All market freshness/execution-day messaging should
+    use ET, not runner-local/UTC date.
+    """
+    import pytz
+    return datetime.now(pytz.timezone("America/New_York")).date()
+
+
 def trading_days_missed(latest_d, today_d):
     """Count NYSE trading days between latest_d (exclusive) and today_d (inclusive)
     that should have produced data. Accounts for weekends + US federal holidays.
@@ -358,15 +370,16 @@ def send_telegram(bot_token, chat_id, text):
 
 def days_in_strategy(walker_state, fallback_first_date):
     """Calendar days since walker's last_transition_date. (signal_days, exact)."""
+    asof_d = today_et()
     ltd = walker_state.get("last_transition_date")
     if ltd is not None:
         if isinstance(ltd, pd.Timestamp):
             ltd = ltd.date()
-        return max(0, (date.today() - ltd).days), True
+        return max(0, (asof_d - ltd).days), True
     if fallback_first_date is not None:
         if isinstance(fallback_first_date, pd.Timestamp):
             fallback_first_date = fallback_first_date.date()
-        return max(0, (date.today() - fallback_first_date).days), False
+        return max(0, (asof_d - fallback_first_date).days), False
     return 0, False
 
 
@@ -592,7 +605,7 @@ def build_summary_block(prev_state, new_state, conditions_line):
     lines = []
     if flips:
         n = len(flips)
-        today_dow = date.today().weekday()
+        today_dow = today_et().weekday()
         nxt_label = "MONDAY" if today_dow >= 4 else "tomorrow"
         lines.append(f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''} at MOC {nxt_label} (before 3:50pm ET)</b>")
         lines.append(conditions_line)
@@ -807,7 +820,7 @@ def main():
             flipped[key] = prev_pos  # store previous (current actual) position
 
     # Per-source freshness verification
-    today_d = date.today()
+    today_d = current_et.date()
     latest_d = latest_date.date() if isinstance(latest_date, pd.Timestamp) else latest_date
     days_stale = (today_d - latest_d).days
     spy_missed = trading_days_missed(latest_d, today_d)
@@ -938,7 +951,7 @@ def main():
     def stale_label(age, src_latest_date):
         if age is None: return "✓"
         if src_latest_date is None: return f"✓ ({age}d cal)"
-        missed = trading_days_missed(src_latest_date, date.today())
+        missed = trading_days_missed(src_latest_date, today_d)
         if missed == 0: return f"✓ ({age}d cal — most recent trading day)"
         if missed == 1: return f"⚠️ 1 trading day missed ({age}d cal)"
         return f"⚠️ {missed} trading days STALE ({age}d cal)"
