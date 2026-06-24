@@ -406,6 +406,65 @@ def save_state(state):
         json.dump(state, f, indent=2, default=str)
 
 
+def state_actual_position(entry):
+    """Backward-compatible actual holding.
+
+    Older state files only had `position`; new files separate the currently held
+    position from the latest signal target.
+    """
+    return entry.get("actual_position") or entry.get("position")
+
+
+def state_signal_position(entry):
+    return entry.get("signal_position") or entry.get("position")
+
+
+def apply_actual_vs_signal_state(prev_state, new_state, signal_date):
+    """Persist actual holdings separately from signal targets.
+
+    Signals are calculated from the latest close, but trades are assumed to be
+    executed at the next MOC. If a prior pending order exists and we are now on a
+    later signal date, mark it executed before comparing the new signal.
+    """
+    signal_date_s = signal_date.isoformat() if hasattr(signal_date, "isoformat") else str(signal_date)
+    for key, ns in new_state.items():
+        if key.startswith("_"):
+            continue
+        prev = prev_state.get(key, {})
+        target = state_signal_position(ns)
+        actual = state_actual_position(prev) or target
+
+        pending = prev.get("pending_order") or {}
+        pending_signal_date = pending.get("signal_date")
+        pending_target = pending.get("buy")
+        if pending_target and pending_signal_date and str(pending_signal_date) < signal_date_s:
+            # Previous next-MOC order should now be reflected in actual holdings.
+            actual = pending_target
+
+        ns["signal_position"] = target
+        ns["actual_position"] = actual
+        ns["position"] = actual  # legacy field now means current holding
+        ns.pop("pending_order", None)
+        if target and actual and target != actual:
+            ns["pending_order"] = {
+                "sell": actual,
+                "buy": target,
+                "signal_date": signal_date_s,
+                "execution": "next MOC",
+            }
+    return new_state
+
+
+def carry_forward_guarded_state(prev_state, new_state, keys, reason):
+    """Do not advance affected strategies when required native data are stale."""
+    for key in keys:
+        if key in prev_state:
+            carried = dict(prev_state[key])
+            carried["data_guarded"] = reason
+            new_state[key] = carried
+    return new_state
+
+
 # ============================
 # Render helpers (with ChatGPT flip-day fix)
 # ============================
@@ -489,6 +548,21 @@ def render_lev_section(label, params, st, fallback_first_date,
         emoji = hourglass_if_progressing(st["days_on_streak"], rl)
         lines.append(f"<u>Reentry</u> (→ {lev}): {st['days_on_streak']}/{rl} days where ({reentry_rule}) {emoji}".rstrip())
     lines.append(_format_days_in_strategy(target, st, fallback_first_date, flipped_today, prev_position))
+    return lines
+
+
+def render_guarded_state_section(title, state_entry, default_position="prior position"):
+    lines = [f"<b>{title}</b>"]
+    reason = state_entry.get("data_guarded", "Required data stale; state retained until native data refreshes")
+    actual = state_actual_position(state_entry) or default_position
+    signal = state_signal_position(state_entry) or actual
+    lines.append(f"⚠️ <b>DATA STALE — state retained</b>: {reason}")
+    lines.append(f"➤ <b>HOLD: {actual}</b>")
+    if signal != actual:
+        lines.append(f"Latest retained signal target: {signal}")
+    pending = state_entry.get("pending_order")
+    if pending:
+        lines.append(f"Pending order retained: SELL {pending['sell']} → BUY {pending['buy']} ({pending.get('execution', 'next MOC')})")
     return lines
 
 
@@ -588,9 +662,11 @@ def build_summary_block(prev_state, new_state, conditions_line):
     for key, ns in new_state.items():
         if key.startswith("_"): continue
         n_total += 1
-        prev_pos = prev_state.get(key, {}).get("position")
-        if prev_pos and prev_pos != ns["position"]:
-            flips.append((ns["label"], prev_pos, ns["position"]))
+        pending = ns.get("pending_order")
+        if pending:
+            flips.append((ns["label"], pending["sell"], pending["buy"]))
+            continue
+        if ns.get("data_guarded"):
             continue
         if ns["state"] == "invested":
             paths = ns.get("paths")
@@ -682,6 +758,9 @@ def main():
     spy_close.index = pd.to_datetime(spy_close.index).normalize()
     latest_date = spy_close.index[-1]
     latest_close = float(spy_close.iloc[-1])
+    prev = load_state()
+    today_d = current_et.date()
+    latest_d = latest_date.date() if isinstance(latest_date, pd.Timestamp) else latest_date
 
     # Sanity check: SPY history must be long enough for SMA300
     if len(spy_close) < 350:
@@ -712,8 +791,10 @@ def main():
         vol30 = vol30_native.reindex(spy_close.index, method="ffill")
         vol30_v = float(vol30.iloc[-1]) if not pd.isna(vol30.iloc[-1]) else None
         nasdaqcom_stale_days = max(0, (spy_close.index[-1] - nasdaqcom_close.index[-1]).days)
+        nasdaqcom_last_d = nasdaqcom_close.index[-1].date()
     else:
         vol30 = pd.Series(np.nan, index=spy_close.index); vol30_v = None
+        nasdaqcom_last_d = None
 
     # QQQ vol20 + SMA175: same native-then-ffill pattern
     qqq_stale_days = 0
@@ -729,9 +810,20 @@ def main():
         qqq_sma175_v = float(qqq_sma175.iloc[-1]) if not pd.isna(qqq_sma175.iloc[-1]) else None
         qqq_vol20_v = float(qqq_vol20.iloc[-1]) if not pd.isna(qqq_vol20.iloc[-1]) else None
         qqq_stale_days = max(0, (spy_close.index[-1] - qqq_close_raw.index[-1]).days)
+        qqq_last_d = qqq_close_raw.index[-1].date()
     else:
         qqq_close = qqq_sma175 = qqq_vol20 = None
         qqq_close_v = qqq_sma175_v = qqq_vol20_v = None
+        qqq_last_d = None
+
+    # Per-source freshness verification. Required native data must be fresh for
+    # the latest SPY signal date before affected strategy streaks/orders advance.
+    days_stale = (today_d - latest_d).days
+    spy_missed = trading_days_missed(latest_d, today_d)
+    qqq_missed = trading_days_missed(qqq_last_d, today_d) if qqq_last_d else None
+    nasdaqcom_missed = trading_days_missed(nasdaqcom_last_d, today_d) if nasdaqcom_last_d else None
+    qqq_signal_fresh = qqq_last_d is not None and qqq_last_d >= latest_d
+    nasdaqcom_signal_fresh = nasdaqcom_last_d is not None and nasdaqcom_last_d >= latest_d
 
     # UNRATE delta
     if un is not None and len(un) >= 4:
@@ -757,7 +849,7 @@ def main():
     spy_lev_brok_st = walk_lev_state(spy_close, sma275, spy_vol20,
                                       SPY_LEV_BROK_PARAMS["vol_thr"],
                                       SPY_LEV_BROK_PARAMS["exit_lag"], SPY_LEV_BROK_PARAMS["entry_lag"])
-    if qqq_close is not None:
+    if qqq_close is not None and qqq_signal_fresh:
         qqq_lev_st = walk_lev_state(qqq_close, qqq_sma175, qqq_vol20,
                                      QQQ_LEV_PARAMS["vol_thr"],
                                      QQQ_LEV_PARAMS["exit_lag"], QQQ_LEV_PARAMS["entry_lag"])
@@ -806,28 +898,28 @@ def main():
         new_state["qqq_lev_brok"] = dict(new_state["qqq_lev_roth"])
         new_state["qqq_lev_brok"]["label"] = "QQQ Leveraged (Brok)"
     else:
-        prev_for_qqq = load_state()
+        prev_for_qqq = prev
         for k in ("qqq_lev_roth", "qqq_lev_brok"):
             if k in prev_for_qqq:
                 new_state[k] = prev_for_qqq[k]
 
-    # Detect flips (per-strategy) — needed for ChatGPT's flip-day fix
-    prev = load_state()
+    if not nasdaqcom_signal_fresh:
+        new_state = carry_forward_guarded_state(
+            prev, new_state, ("top7_roth", "top7_brok"),
+            "NASDAQCOM data stale; Top-7 state retained until native data refreshes")
+    if not qqq_signal_fresh:
+        new_state = carry_forward_guarded_state(
+            prev, new_state, ("qqq_lev_roth", "qqq_lev_brok"),
+            "QQQ data stale; QQQ leveraged state retained until native data refreshes")
+
+    new_state = apply_actual_vs_signal_state(prev, new_state, latest_d)
+
+    # Detect pending orders (per-strategy) — needed for flip-day display
     flipped = {}
     for key, ns in new_state.items():
-        prev_pos = prev.get(key, {}).get("position")
-        if prev_pos and prev_pos != ns["position"]:
-            flipped[key] = prev_pos  # store previous (current actual) position
-
-    # Per-source freshness verification
-    today_d = current_et.date()
-    latest_d = latest_date.date() if isinstance(latest_date, pd.Timestamp) else latest_date
-    days_stale = (today_d - latest_d).days
-    spy_missed = trading_days_missed(latest_d, today_d)
-    qqq_last_d = (qqq_df["Close"].dropna().index[-1].date() if qqq_df is not None and len(qqq_df["Close"].dropna()) else None)
-    qqq_missed = trading_days_missed(qqq_last_d, today_d) if qqq_last_d else None
-    nasdaqcom_last_d = (nasdaqcom_df["NASDAQCOM"].dropna().index[-1].date() if nasdaqcom_df is not None and len(nasdaqcom_df["NASDAQCOM"].dropna()) else None)
-    nasdaqcom_missed = trading_days_missed(nasdaqcom_last_d, today_d) if nasdaqcom_last_d else None
+        pending = ns.get("pending_order")
+        if pending:
+            flipped[key] = pending["sell"]  # current actual position
 
     fresh_warns = []
     if spy_missed >= 1:
@@ -839,7 +931,7 @@ def main():
 
     stale_warning = None
     if fresh_warns:
-        stale_warning = "⚠️ <b>DATA FRESHNESS WARNING</b> — " + "; ".join(fresh_warns) + ". Today's signals may differ from older-data computation."
+        stale_warning = "⚠️ <b>DATA FRESHNESS WARNING</b> — " + "; ".join(fresh_warns) + ". Affected strategy state/orders are retained until native data refreshes."
     elif days_stale > 5:
         stale_warning = f"⚠️ <b>STALE DATA</b> — SPY most recent close is {latest_d} ({days_stale} calendar days old)."
 
@@ -894,10 +986,13 @@ def main():
     lines.append("<b>🏦 ROTH IRA</b>")
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    lines.extend(render_top7_section("Roth", ROTH_TOP7_PARAMS, roth_top7_st, spy_first_date,
-                                      unrate_failed=unrate_failed,
-                                      flipped_today=("top7_roth" in flipped),
-                                      prev_position=flipped.get("top7_roth")))
+    if nasdaqcom_signal_fresh:
+        lines.extend(render_top7_section("Roth", ROTH_TOP7_PARAMS, roth_top7_st, spy_first_date,
+                                          unrate_failed=unrate_failed,
+                                          flipped_today=("top7_roth" in flipped),
+                                          prev_position=flipped.get("top7_roth")))
+    else:
+        lines.extend(render_guarded_state_section("Top-7 (Roth) — ALT-A", new_state.get("top7_roth", {}), "TOP-7 STOCKS"))
     lines.append("")
     lines.extend(render_lev_section("SPY Leveraged (Roth)", SPY_LEV_ROTH_PARAMS, spy_lev_roth_st,
                                      spy_first_date,
@@ -911,16 +1006,19 @@ def main():
                                          prev_position=flipped.get("qqq_lev_roth")))
         lines.append("")
     else:
-        lines.append("<b>QQQ Leveraged (Roth)</b>"); lines.append("⚠️ DATA UNAVAILABLE — retain prior position"); lines.append("")
+        lines.extend(render_guarded_state_section("QQQ Leveraged (Roth)", new_state.get("qqq_lev_roth", {}), "TQQQ")); lines.append("")
 
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("<b>💼 BROKERAGE</b>")
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("")
-    lines.extend(render_top7_section("Brok", BROK_TOP7_PARAMS, brok_top7_st, spy_first_date,
-                                      unrate_failed=unrate_failed,
-                                      flipped_today=("top7_brok" in flipped),
-                                      prev_position=flipped.get("top7_brok")))
+    if nasdaqcom_signal_fresh:
+        lines.extend(render_top7_section("Brok", BROK_TOP7_PARAMS, brok_top7_st, spy_first_date,
+                                          unrate_failed=unrate_failed,
+                                          flipped_today=("top7_brok" in flipped),
+                                          prev_position=flipped.get("top7_brok")))
+    else:
+        lines.extend(render_guarded_state_section("Top-7 (Brok) — BROK_A", new_state.get("top7_brok", {}), "TOP-7 STOCKS"))
     lines.append("")
     lines.extend(render_lev_section("SPY Leveraged (Brok)", SPY_LEV_BROK_PARAMS, spy_lev_brok_st,
                                      spy_first_date,
@@ -934,7 +1032,7 @@ def main():
                                          prev_position=flipped.get("qqq_lev_brok")))
         lines.append("")
     else:
-        lines.append("<b>QQQ Leveraged (Brok)</b>"); lines.append("⚠️ DATA UNAVAILABLE — retain prior position"); lines.append("")
+        lines.extend(render_guarded_state_section("QQQ Leveraged (Brok)", new_state.get("qqq_lev_brok", {}), "TQQQ")); lines.append("")
 
     # Health footer with holiday-aware staleness
     lines.append("━━━━━━━━━━━━━━━━━━")
