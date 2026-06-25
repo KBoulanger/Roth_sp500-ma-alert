@@ -659,9 +659,15 @@ def build_summary_block(prev_state, new_state, conditions_line):
             watching.append((label_text, direction, streak, threshold))
 
     n_total = 0
+    n_risk_on = 0
+    defensive = []
     for key, ns in new_state.items():
         if key.startswith("_"): continue
         n_total += 1
+        if ns.get("state") == "invested":
+            n_risk_on += 1
+        else:
+            defensive.append((ns.get("label", key), ns.get("position", "defensive")))
         pending = ns.get("pending_order")
         if pending:
             flips.append((ns["label"], pending["sell"], pending["buy"]))
@@ -712,7 +718,14 @@ def build_summary_block(prev_state, new_state, conditions_line):
         for lbl, direction, s, t in watching:
             lines.append(f"  • {lbl} {direction} {s}/{t} ⏳")
         return lines
-    lines.append(f"<b>🟢 ALL CLEAR — {n_total} of {n_total} strategies stable, no signals progressing</b>")
+    if defensive:
+        n_def = len(defensive)
+        lines.append(f"<b>🟡 NO NEW CHANGES — {n_risk_on} risk-on, {n_def} defensive; no signals progressing</b>")
+        lines.append(conditions_line)
+        for lbl, pos in defensive:
+            lines.append(f"  • {lbl} remains in {pos}")
+        return lines
+    lines.append(f"<b>🟢 ALL CLEAR — {n_total} of {n_total} strategies risk-on, no signals progressing</b>")
     lines.append(conditions_line)
     return lines
 
