@@ -15,7 +15,7 @@
         50
       ]
     ],
-    "reentry_streak": 64,
+    "reentry_streak": 65,
     "reentry_threshold": 5,
     "signal_position": "TOP-7 STOCKS",
     "actual_position": "TOP-7 STOCKS"
@@ -36,7 +36,7 @@
         50
       ]
     ],
-    "reentry_streak": 64,
+    "reentry_streak": 65,
     "reentry_threshold": 5,
     "signal_position": "TOP-7 STOCKS",
     "actual_position": "TOP-7 STOCKS"
@@ -47,7 +47,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 279,
+    "reentry_streak": 280,
     "reentry_threshold": 10,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -58,31 +58,43 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 279,
+    "reentry_streak": 280,
     "reentry_threshold": 10,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
   },
   "qqq_lev_roth": {
     "label": "QQQ Leveraged (Roth)",
-    "state": "defensive",
+    "state": "invested",
     "position": "USFR",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 1,
+    "reentry_streak": 0,
     "reentry_threshold": 2,
-    "signal_position": "USFR",
-    "actual_position": "USFR"
+    "signal_position": "TQQQ",
+    "actual_position": "USFR",
+    "pending_order": {
+      "sell": "USFR",
+      "buy": "TQQQ",
+      "signal_date": "2026-07-13",
+      "execution": "next MOC"
+    }
   },
   "qqq_lev_brok": {
     "label": "QQQ Leveraged (Brok)",
-    "state": "defensive",
+    "state": "invested",
     "position": "USFR",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 1,
+    "reentry_streak": 0,
     "reentry_threshold": 2,
-    "signal_position": "USFR",
-    "actual_position": "USFR"
+    "signal_position": "TQQQ",
+    "actual_position": "USFR",
+    "pending_order": {
+      "sell": "USFR",
+      "buy": "TQQQ",
+      "signal_date": "2026-07-13",
+      "execution": "next MOC"
+    }
   }
 }
