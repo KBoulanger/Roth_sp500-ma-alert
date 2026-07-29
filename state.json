@@ -15,7 +15,7 @@
         50
       ]
     ],
-    "reentry_streak": 76,
+    "reentry_streak": 77,
     "reentry_threshold": 5,
     "signal_position": "TOP-7 STOCKS",
     "actual_position": "TOP-7 STOCKS"
@@ -36,7 +36,7 @@
         50
       ]
     ],
-    "reentry_streak": 76,
+    "reentry_streak": 77,
     "reentry_threshold": 5,
     "signal_position": "TOP-7 STOCKS",
     "actual_position": "TOP-7 STOCKS"
@@ -47,7 +47,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 291,
+    "reentry_streak": 292,
     "reentry_threshold": 10,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -58,7 +58,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 291,
+    "reentry_streak": 292,
     "reentry_threshold": 10,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -69,7 +69,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 11,
+    "reentry_streak": 12,
     "reentry_threshold": 2,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
@@ -80,7 +80,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 2,
-    "reentry_streak": 11,
+    "reentry_streak": 12,
     "reentry_threshold": 2,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
