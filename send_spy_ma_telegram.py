@@ -41,9 +41,17 @@ Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
   Strategy specs:
     ROTH (ALT-A): D-asym 300/50/100/5/0.40/10/tiered_0.1
     BROK (BROK_A): D-asym 300/50/100/5/0.45/25/tiered_0.1
-    SPY Leveraged Roth: MA275 v<22% e=1 r=10 → UPRO ↔ USFR
-    SPY Leveraged Brok: MA275 v<22% e=2 r=10 → UPRO ↔ USFR
-    QQQ Leveraged R+B: MA175 v<30% e=2 r=2  → TQQQ ↔ USFR
+    SPY Leveraged R+B:  MA300 v<21% e=1 r=1 → UPRO ↔ USFR
+    QQQ Leveraged R+B:  MA150 v<31% e=4 r=1 → TQQQ ↔ USFR
+
+    Config change 2026-08-12. Previously: SPY MA275 v<22% e=1 r=10 (Roth) /
+    e=2 r=10 (Brok); QQQ MA175 v<30% e=2 r=2. Both accounts now share one config
+    per sleeve. Rationale and supporting analysis are in the change log at the end
+    of "Investment strategy implementation". Short version: the old SPY settings sat
+    one to two steps from an exit-lag cliff where drawdown jumps to -78%/-84%; vol<21%
+    with e=1 sits three steps clear at unchanged CAGR. The new QQQ settings raise CAGR
+    and rank top-0.3%% in both halves of the sample, where the old ones ranked top-10%%
+    in the first half only.
 """
 
 import os
@@ -111,15 +119,17 @@ BROK_TOP7_PARAMS = {
     "vol_thr": 0.45, "E_vol": 25, "ur_thr": 0.1,
 }
 SPY_LEV_ROTH_PARAMS = {
-    "ma": 275, "vol_thr": 0.22, "vol_window": 20, "exit_lag": 1, "entry_lag": 10,
+    "ma": 300, "vol_thr": 0.21, "vol_window": 20, "exit_lag": 1, "entry_lag": 1,
     "leveraged": "UPRO", "defensive": "USFR", "signal_asset": "SPY",
 }
 SPY_LEV_BROK_PARAMS = {
-    "ma": 275, "vol_thr": 0.22, "vol_window": 20, "exit_lag": 2, "entry_lag": 10,
+    # identical to Roth since 2026-08-12; the old brokerage-only exit_lag=2 was dropped
+    "ma": 300, "vol_thr": 0.21, "vol_window": 20, "exit_lag": 1, "entry_lag": 1,
     "leveraged": "UPRO", "defensive": "USFR", "signal_asset": "SPY",
 }
 QQQ_LEV_PARAMS = {
-    "ma": 175, "vol_thr": 0.30, "vol_window": 20, "exit_lag": 2, "entry_lag": 2,
+    # e=4 / r=1 is deliberate: slow to exit, fast to re-enter
+    "ma": 150, "vol_thr": 0.31, "vol_window": 20, "exit_lag": 4, "entry_lag": 1,
     "leveraged": "TQQQ", "defensive": "USFR", "signal_asset": "QQQ",
 }
 
@@ -570,8 +580,8 @@ def render_guarded_state_section(title, state_entry, default_position="prior pos
 # Conditions line + summary block
 # ============================
 
-def build_conditions_line(spy_close, sma100, sma275, sma300, spy_vol20,
-                           qqq_close, qqq_sma175, qqq_vol20,
+def build_conditions_line(spy_close, sma100, sma300, spy_vol20,
+                           qqq_close, qqq_sma150, qqq_vol20,
                            nasdaqcom_vol30, un_chg, un_flag_01, unrate_failed,
                            nasdaqcom_stale_days=0):
     BORDER_PCT = 1.5
@@ -625,11 +635,11 @@ def build_conditions_line(spy_close, sma100, sma275, sma300, spy_vol20,
         return f"⚠️ QQQ {-gap_pct:.1f}% BELOW SMA{label_n}"
 
     bits = []
-    if spy_close is not None and sma100 is not None and sma275 is not None and sma300 is not None:
-        smas = [(sma100, "SMA100"), (sma275, "SMA275"), (sma300, "SMA300")]
-        bits.append(f"{spy_trend_summary(spy_close, smas)}, {vol_phrase(spy_vol20, 22, 'SPY vol')}")
-    if qqq_close is not None and qqq_sma175 is not None:
-        bits.append(f"{qqq_trend(qqq_close, qqq_sma175, '175')}, {vol_phrase(qqq_vol20, 30, 'QQQ vol')}")
+    if spy_close is not None and sma100 is not None and sma300 is not None:
+        smas = [(sma100, "SMA100"), (sma300, "SMA300")]
+        bits.append(f"{spy_trend_summary(spy_close, smas)}, {vol_phrase(spy_vol20, 21, 'SPY vol')}")
+    if qqq_close is not None and qqq_sma150 is not None:
+        bits.append(f"{qqq_trend(qqq_close, qqq_sma150, '150')}, {vol_phrase(qqq_vol20, 31, 'QQQ vol')}")
     if nasdaqcom_vol30 is not None:
         v_pct = nasdaqcom_vol30 * 100
         if v_pct >= 45: nasdaqcom_str = f"⚠️ NASDAQ vol {fmt_vol_pct(v_pct, 45)} (≥45% Brok thr)"
@@ -785,10 +795,9 @@ def main():
     sma50 = spy_close.rolling(50).mean()
     sma100 = spy_close.rolling(100).mean()
     sma250 = spy_close.rolling(250).mean()
-    sma275 = spy_close.rolling(275).mean()
     sma300 = spy_close.rolling(300).mean()
     sma50_v = float(sma50.iloc[-1]); sma100_v = float(sma100.iloc[-1])
-    sma250_v = float(sma250.iloc[-1]); sma275_v = float(sma275.iloc[-1]); sma300_v = float(sma300.iloc[-1])
+    sma250_v = float(sma250.iloc[-1]); sma300_v = float(sma300.iloc[-1])
 
     # SPY 20d vol
     spy_vol20 = compute_vol20(spy_close)
@@ -809,24 +818,24 @@ def main():
         vol30 = pd.Series(np.nan, index=spy_close.index); vol30_v = None
         nasdaqcom_last_d = None
 
-    # QQQ vol20 + SMA175: same native-then-ffill pattern
+    # QQQ vol20 + SMA150: same native-then-ffill pattern
     qqq_stale_days = 0
     if qqq_df is not None:
         qqq_close_raw = qqq_df["Close"].copy()
         qqq_close_raw.index = pd.to_datetime(qqq_close_raw.index).normalize()
-        qqq_sma175_native = qqq_close_raw.rolling(175).mean()
+        qqq_sma150_native = qqq_close_raw.rolling(150).mean()
         qqq_vol20_native = compute_vol20(qqq_close_raw)
         qqq_close = qqq_close_raw.reindex(spy_close.index, method="ffill")
-        qqq_sma175 = qqq_sma175_native.reindex(spy_close.index, method="ffill")
+        qqq_sma150 = qqq_sma150_native.reindex(spy_close.index, method="ffill")
         qqq_vol20 = qqq_vol20_native.reindex(spy_close.index, method="ffill")
         qqq_close_v = float(qqq_close.iloc[-1]) if not pd.isna(qqq_close.iloc[-1]) else None
-        qqq_sma175_v = float(qqq_sma175.iloc[-1]) if not pd.isna(qqq_sma175.iloc[-1]) else None
+        qqq_sma150_v = float(qqq_sma150.iloc[-1]) if not pd.isna(qqq_sma150.iloc[-1]) else None
         qqq_vol20_v = float(qqq_vol20.iloc[-1]) if not pd.isna(qqq_vol20.iloc[-1]) else None
         qqq_stale_days = max(0, (spy_close.index[-1] - qqq_close_raw.index[-1]).days)
         qqq_last_d = qqq_close_raw.index[-1].date()
     else:
-        qqq_close = qqq_sma175 = qqq_vol20 = None
-        qqq_close_v = qqq_sma175_v = qqq_vol20_v = None
+        qqq_close = qqq_sma150 = qqq_vol20 = None
+        qqq_close_v = qqq_sma150_v = qqq_vol20_v = None
         qqq_last_d = None
 
     # Per-source freshness verification. Required native data must be fresh for
@@ -856,14 +865,14 @@ def main():
                                      BROK_TOP7_PARAMS["vol_thr"], BROK_TOP7_PARAMS["E_vol"],
                                      BROK_TOP7_PARAMS["E_ma"], BROK_TOP7_PARAMS["R_re"])
     brok_top7_st["_unrate_high"] = un_flag_01
-    spy_lev_roth_st = walk_lev_state(spy_close, sma275, spy_vol20,
+    spy_lev_roth_st = walk_lev_state(spy_close, sma300, spy_vol20,
                                       SPY_LEV_ROTH_PARAMS["vol_thr"],
                                       SPY_LEV_ROTH_PARAMS["exit_lag"], SPY_LEV_ROTH_PARAMS["entry_lag"])
-    spy_lev_brok_st = walk_lev_state(spy_close, sma275, spy_vol20,
+    spy_lev_brok_st = walk_lev_state(spy_close, sma300, spy_vol20,
                                       SPY_LEV_BROK_PARAMS["vol_thr"],
                                       SPY_LEV_BROK_PARAMS["exit_lag"], SPY_LEV_BROK_PARAMS["entry_lag"])
     if qqq_close is not None and qqq_signal_fresh:
-        qqq_lev_st = walk_lev_state(qqq_close, qqq_sma175, qqq_vol20,
+        qqq_lev_st = walk_lev_state(qqq_close, qqq_sma150, qqq_vol20,
                                      QQQ_LEV_PARAMS["vol_thr"],
                                      QQQ_LEV_PARAMS["exit_lag"], QQQ_LEV_PARAMS["entry_lag"])
     else:
@@ -954,9 +963,9 @@ def main():
 
     # Build top of message
     conditions_line = build_conditions_line(
-        spy_close=latest_close, sma100=sma100_v, sma275=sma275_v, sma300=sma300_v,
+        spy_close=latest_close, sma100=sma100_v, sma300=sma300_v,
         spy_vol20=spy_vol20_v,
-        qqq_close=qqq_close_v, qqq_sma175=qqq_sma175_v, qqq_vol20=qqq_vol20_v,
+        qqq_close=qqq_close_v, qqq_sma150=qqq_sma150_v, qqq_vol20=qqq_vol20_v,
         nasdaqcom_vol30=vol30_v, un_chg=un_chg, un_flag_01=un_flag_01,
         unrate_failed=unrate_failed, nasdaqcom_stale_days=nasdaqcom_stale_days)
     summary_block = build_summary_block(prev, new_state, conditions_line)
@@ -987,11 +996,11 @@ def main():
                  f"UNRATE 3-mo Δ: {unrate_str}")
     lines.append("")
     lines.append("<b>SPY Leveraged inputs:</b>")
-    lines.append(f"SPY: {latest_close:.2f} | SPY SMA275: {sma275_v:.2f} | SPY vol20: {spy_vol_str} (thr 22%)")
+    lines.append(f"SPY: {latest_close:.2f} | SPY SMA300: {sma300_v:.2f} | SPY vol20: {spy_vol_str} (thr 21%)")
     lines.append("")
     if qqq_close is not None:
         lines.append("<b>QQQ Leveraged inputs:</b>")
-        lines.append(f"QQQ: {qqq_close_v:.2f} | QQQ SMA175: {qqq_sma175_v:.2f} | QQQ vol20: {qqq_vol_str} (thr 30%)")
+        lines.append(f"QQQ: {qqq_close_v:.2f} | QQQ SMA150: {qqq_sma150_v:.2f} | QQQ vol20: {qqq_vol_str} (thr 31%)")
         lines.append("")
 
     # ROTH section (with flip-day awareness via flipped dict)
