@@ -39,7 +39,8 @@ Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
       YYYY-MM-DD)'.
 
   Strategy specs:
-    ROTH (ALT-A): D-asym 300/50/100/5/0.40/10/tiered_0.1
+    ROTH (ALT-A): D-asym 300/50/100/5/0.40/10/tiered_0.1  + runup ratchet G60/S25 (Roth only,
+                  added 2026-08-14; third exit path on the basket's own NAV, locked to Jan rebalance)
     BROK (BROK_A): D-asym 300/50/100/5/0.45/25/tiered_0.1
     SPY Leveraged R+B:  MA300 v<21% e=1 r=1 → UPRO ↔ USFR
     QQQ Leveraged R+B:  MA150 v<31% e=4 r=1 → TQQQ ↔ USFR
@@ -117,6 +118,15 @@ BROK_TOP7_PARAMS = {
     "name": "BROK_A",
     "ma_exit": 300, "E_ma": 50, "ma_re": 100, "R_re": 5,
     "vol_thr": 0.45, "E_vol": 25, "ur_thr": 0.1,
+}
+# Runup ratchet — ROTH ONLY (added 2026-08-14). Third exit path on the Top-7 Roth sleeve.
+# Arms when the Top-7 basket is >= +ARM_GAIN vs its January baseline; fires when it closes
+# >= STOP_DROP below its post-arm high; then locked out until the next January rebalance.
+TOP7_RATCHET_PARAMS = {
+    "arm_gain": 0.60,
+    "stop_drop": 0.25,
+    "basket_file": "top7_basket.json",
+    "roth_only": True,
 }
 SPY_LEV_ROTH_PARAMS = {
     "ma": 300, "vol_thr": 0.21, "vol_window": 20, "exit_lag": 1, "entry_lag": 1,
@@ -494,8 +504,93 @@ def _format_days_in_strategy(currently, walker_state, fallback_first_date,
     return f"<i>Currently {currently} for {n_days}+ days (no flip in current data window)</i>"
 
 
+def load_basket_config(path, today):
+    """Load the Top-7 basket config. Returns (cfg, warning). cfg is None if unusable.
+    Refuses to run the ratchet on a stale file — a wrong-year basket means wrong weights."""
+    import json, os
+    if not os.path.exists(path):
+        return None, f"basket config {path} missing — ratchet DISABLED"
+    try:
+        cfg = json.load(open(path))
+    except Exception as e:
+        return None, f"basket config unreadable ({e}) — ratchet DISABLED"
+    if int(cfg.get("year", 0)) != today.year:
+        return None, (f"basket config is for {cfg.get('year')} but it is {today.year} — "
+                      f"ratchet DISABLED until re-seeded (see reseed_note in the file)")
+    hs = cfg.get("holdings") or []
+    if not hs:
+        return None, "basket config has no holdings — ratchet DISABLED"
+    tot = sum(float(h["weight"]) for h in hs)
+    if abs(tot - 1.0) > 0.01:
+        return None, f"basket weights sum to {tot:.4f}, not 1.0 — ratchet DISABLED"
+    return cfg, None
+
+
+def fetch_basket_closes(tickers):
+    """Daily closes for the basket names. One call, auto-adjusted."""
+    import yfinance as yf
+    df = yf.download(tickers, period="1y", auto_adjust=True, progress=False)
+    if isinstance(df.columns, pd.MultiIndex):
+        close = df["Close"]
+    else:
+        close = df[["Close"]].rename(columns={"Close": tickers[0]})
+    return close.dropna(how="all")
+
+
+def compute_basket_nav(cfg, closes):
+    """Basket NAV indexed to 1.0 at the config's baseline closes (buy-and-hold, weights drift)."""
+    hs = cfg["holdings"]
+    ticks = [h["ticker"] for h in hs]
+    missing = [t for t in ticks if t not in closes.columns]
+    if missing:
+        raise ValueError(f"missing price data for {missing}")
+    sub = closes[ticks].dropna()
+    # Only the performance year counts: pre-baseline prices must never arm the ratchet.
+    base_dt = pd.Timestamp(cfg["baseline_date"])
+    sub = sub[sub.index >= base_dt]
+    if sub.empty:
+        raise ValueError(f"no basket price data on/after baseline {base_dt.date()}")
+    base = pd.Series({h["ticker"]: float(h["baseline_close"]) for h in hs})
+    w = pd.Series({h["ticker"]: float(h["weight"]) for h in hs})
+    nav = (sub[ticks] / base[ticks] * w[ticks]).sum(axis=1)
+    return nav
+
+
+def walk_ratchet_state(nav, arm_gain, stop_drop):
+    """Walk the ratchet over the basket NAV (already indexed to 1.0 at January baseline).
+    Arms at >= +arm_gain; fires when close <= high_water*(1-stop_drop). No re-entry."""
+    armed = False
+    hwm = 0.0
+    fired = False
+    arm_date = None
+    fire_date = None
+    for dt, v in nav.items():
+        if not armed and (v - 1.0) >= arm_gain:
+            armed = True
+            hwm = v
+            arm_date = dt
+        if armed and not fired:
+            if v > hwm:
+                hwm = v
+            if v <= hwm * (1.0 - stop_drop):
+                fired = True
+                fire_date = dt
+    last = float(nav.iloc[-1])
+    stop_level = hwm * (1.0 - stop_drop) if armed else None
+    return {
+        "armed": armed, "fired": fired,
+        "arm_date": arm_date, "fire_date": fire_date,
+        "hwm": hwm if armed else None,
+        "nav": last,
+        "ytd": last - 1.0,
+        "off_high": (last / hwm - 1.0) if armed and hwm else None,
+        "stop_level": stop_level,
+        "dist_to_stop": ((last / stop_level) - 1.0) if stop_level else None,
+    }
+
+
 def render_top7_section(label_prefix, params, st, fallback_first_date, unrate_failed=False,
-                         flipped_today=False, prev_position=None):
+                         flipped_today=False, prev_position=None, ratchet=None, ratchet_warn=None):
     lines = []
     lines.append(f"<b>Top-7 ({label_prefix}) — {params['name']}</b>")
     lines.append(f"<i>D-asym {params['ma_exit']}/{params['E_ma']}/{params['ma_re']}/{params['R_re']}/"
@@ -523,6 +618,22 @@ def render_top7_section(label_prefix, params, st, fallback_first_date, unrate_fa
         lines.append(f"<u>Exit</u> (→ defensive): — (rules: NASDAQCOM vol30 ≥ {int(params['vol_thr']*100)}% for {params['E_vol']}d OR SP500 &lt; SMA{params['ma_exit']} for {params['E_ma']}d)")
         re_emoji = hourglass_if_progressing(st["reentry_streak"], params["R_re"])
         lines.append(f"<u>Reentry</u> (→ TOP-7): {st['reentry_streak']}/{params['R_re']} days where (SP500 ≥ SMA{params['ma_re']}) {re_emoji}".rstrip())
+    if ratchet_warn:
+        lines.append(f"<u>Runup ratchet</u>: ⚠️ <b>{ratchet_warn}</b>")
+    elif ratchet is not None:
+        g = int(TOP7_RATCHET_PARAMS["arm_gain"] * 100)
+        d = int(TOP7_RATCHET_PARAMS["stop_drop"] * 100)
+        if ratchet["fired"]:
+            lines.append(f"<u>Runup ratchet</u>: 🔴 <b>FIRED {ratchet['fire_date'].date()}</b> — "
+                         f"locked to defensive until the January rebalance (no reentry).")
+            lines.append(f"  • basket {ratchet['ytd']:+.0%} YTD, {ratchet['off_high']:+.0%} off its post-arm high")
+        elif ratchet["armed"]:
+            lines.append(f"<u>Runup ratchet</u>: 🟡 ARMED {ratchet['arm_date'].date()} (basket hit +{g}% YTD)")
+            lines.append(f"  • basket {ratchet['ytd']:+.0%} YTD | {ratchet['off_high']:+.0%} off high | "
+                         f"stop at -{d}% from high = {ratchet['stop_level'] - 1.0:+.0%} YTD | "
+                         f"{ratchet['dist_to_stop']:+.1%} to trigger")
+        else:
+            lines.append(f"<u>Runup ratchet</u>: not armed (basket {ratchet['ytd']:+.0%} YTD; arms at +{g}%)")
     if unrate_failed:
         lines.append("<u>Defensive routing</u>: ⚠️ <b>UNRATE FETCH FAILED</b> — assuming stable (→ SP500). Verify manually.")
     else:
@@ -861,6 +972,25 @@ def main():
                                      ROTH_TOP7_PARAMS["vol_thr"], ROTH_TOP7_PARAMS["E_vol"],
                                      ROTH_TOP7_PARAMS["E_ma"], ROTH_TOP7_PARAMS["R_re"])
     roth_top7_st["_unrate_high"] = un_flag_01
+
+    # --- Runup ratchet (ROTH ONLY). Third exit path; overrides the D-asym state when fired. ---
+    ratchet = None
+    ratchet_warn = None
+    try:
+        _cfg, ratchet_warn = load_basket_config(TOP7_RATCHET_PARAMS["basket_file"], pd.Timestamp.today())
+        if _cfg is not None:
+            _closes = fetch_basket_closes([h["ticker"] for h in _cfg["holdings"]])
+            _nav = compute_basket_nav(_cfg, _closes)
+            ratchet = walk_ratchet_state(_nav, TOP7_RATCHET_PARAMS["arm_gain"],
+                                         TOP7_RATCHET_PARAMS["stop_drop"])
+    except Exception as e:
+        ratchet = None
+        ratchet_warn = f"ratchet computation failed ({e}) — Roth D-asym signal shown alone"
+    if ratchet is not None and ratchet["fired"]:
+        # Lockout: force defensive and block reentry until the January rebalance.
+        roth_top7_st["state"] = "defensive"
+        roth_top7_st["reentry_streak"] = 0
+        roth_top7_st["_ratchet_locked"] = True
     brok_top7_st = walk_dasym_state(spy_close, sma300, sma100, vol30,
                                      BROK_TOP7_PARAMS["vol_thr"], BROK_TOP7_PARAMS["E_vol"],
                                      BROK_TOP7_PARAMS["E_ma"], BROK_TOP7_PARAMS["R_re"])
@@ -890,6 +1020,11 @@ def main():
         "paths": [("vol", roth_top7_st["vol_streak"], ROTH_TOP7_PARAMS["E_vol"]),
                   ("MA",  roth_top7_st["ma_streak"],  ROTH_TOP7_PARAMS["E_ma"])],
         "reentry_streak": roth_top7_st["reentry_streak"], "reentry_threshold": ROTH_TOP7_PARAMS["R_re"],
+        "ratchet_armed": bool(ratchet["armed"]) if ratchet else None,
+        "ratchet_fired": bool(ratchet["fired"]) if ratchet else None,
+        "ratchet_hwm": float(ratchet["hwm"]) if (ratchet and ratchet["hwm"]) else None,
+        "ratchet_nav": float(ratchet["nav"]) if ratchet else None,
+        "ratchet_locked": bool(roth_top7_st.get("_ratchet_locked", False)),
     }
     new_state["top7_brok"] = {
         "label": "Top-7 (Brok)", "state": brok_top7_st["state"],
@@ -1012,7 +1147,8 @@ def main():
         lines.extend(render_top7_section("Roth", ROTH_TOP7_PARAMS, roth_top7_st, spy_first_date,
                                           unrate_failed=unrate_failed,
                                           flipped_today=("top7_roth" in flipped),
-                                          prev_position=flipped.get("top7_roth")))
+                                          prev_position=flipped.get("top7_roth"),
+                                          ratchet=ratchet, ratchet_warn=ratchet_warn))
     else:
         lines.extend(render_guarded_state_section("Top-7 (Roth) — ALT-A", new_state.get("top7_roth", {}), "TOP-7 STOCKS"))
     lines.append("")
