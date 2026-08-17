@@ -1,7 +1,7 @@
 {
   "top7_roth": {
     "label": "Top-7 (Roth)",
-    "state": "invested",
+    "state": "defensive",
     "position": "TOP-7 STOCKS",
     "paths": [
       [
@@ -15,10 +15,21 @@
         50
       ]
     ],
-    "reentry_streak": 89,
+    "reentry_streak": 0,
     "reentry_threshold": 5,
-    "signal_position": "TOP-7 STOCKS",
-    "actual_position": "TOP-7 STOCKS"
+    "ratchet_armed": true,
+    "ratchet_fired": true,
+    "ratchet_hwm": 6.845999398876792,
+    "ratchet_nav": 5.3277351584909285,
+    "ratchet_locked": true,
+    "signal_position": "SP500",
+    "actual_position": "TOP-7 STOCKS",
+    "pending_order": {
+      "sell": "TOP-7 STOCKS",
+      "buy": "SP500",
+      "signal_date": "2026-08-17",
+      "execution": "next MOC"
+    }
   },
   "top7_brok": {
     "label": "Top-7 (Brok)",
@@ -36,7 +47,7 @@
         50
       ]
     ],
-    "reentry_streak": 89,
+    "reentry_streak": 90,
     "reentry_threshold": 5,
     "signal_position": "TOP-7 STOCKS",
     "actual_position": "TOP-7 STOCKS"
@@ -47,7 +58,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 313,
+    "reentry_streak": 314,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -58,7 +69,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 313,
+    "reentry_streak": 314,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -69,7 +80,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 4,
-    "reentry_streak": 26,
+    "reentry_streak": 27,
     "reentry_threshold": 1,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
@@ -80,7 +91,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 4,
-    "reentry_streak": 26,
+    "reentry_streak": 27,
     "reentry_threshold": 1,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
