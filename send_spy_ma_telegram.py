@@ -2,9 +2,22 @@
 
 Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
 
+  Scheduler hardening (2026-09-04):
+    + Full-monitor attempts moved to 5:20 PM ET, with 5:40 PM and 6:10 PM
+      retries. Nasdaq index corrections can run through 5:15 PM; GitHub's IANA
+      timezone schedule keeps these times fixed through DST.
+    + Every automatic attempt requires the same most-recent completed XNYS session
+      from SPY, QQQ, Nasdaq Composite, and (when enabled) the Top-7 basket. Earlier
+      missing bars defer; the final attempt fails closed and triggers an alert.
+    + A persisted market-session key prevents duplicate Telegram reports/state
+      advancement across retries. Manual runs are safe/deduped by default and expose
+      explicit force-repeat / unsafe-partial switches for diagnostics.
+    + XNYS sessions replace the US-federal-holiday approximation, and delayed
+      GitHub jobs can process the latest completed session without a narrow clock gate.
+
   ChatGPT review:
-    + Flip-day display: HOLD NOW (current actual position until tomorrow's MOC)
-      vs TOMORROW MOC (target after execution). Days-counter line shows the
+    + Flip-day display: HOLD NOW (current actual position until the next-session MOC)
+      vs NEXT-SESSION MOC (target after execution). Days-counter line shows the
       pending-execution clarifier. Avoids implying the new asset is held today.
 
   Bug fixes (audit, 2026-04-27):
@@ -14,16 +27,14 @@ Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
     + QQQ ffill bug — same pattern, same fix for vol20 and SMA175.
     + SPY data length sanity check (aborts if <350 days; SMA300 needs it).
     + QQQ fetch failure now explicitly reloads prior state from state.json.
-    + Holiday-aware staleness — USFederalHolidayCalendar trading-day count
-      replaces calendar-day count (won't false-alarm after holidays).
+    + Holiday-aware staleness — later replaced by the XNYS exchange calendar.
 
   UX upgrades:
     + 🟢 ALL CLEAR / 🟡 WATCHING / 🟠 APPROACHING / 🔴 ACTION status block
     + 'Markets:' conditions line — SPY trend across all 3 SMAs collapsed,
       SPY vol20, QQQ trend, NASDAQ vol30, UNRATE.
     + Top-7 summary surfaces BOTH vol AND MA paths separately.
-    + Action wording: 'MOC tomorrow' / 'MOC MONDAY (before 3:50pm ET)'
-      with explicit 'SELL X, BUY Y'.
+    + Action wording includes explicit 'SELL X, BUY Y'.
     + UNRATE-fetch-failure made visible in Top-7 routing line + Markets line.
     + Severe staleness banner if NASDAQCOM/QQQ >5 days stale.
     + Health footer upgraded from ✓/✗ to 'most recent trading day' /
@@ -60,8 +71,8 @@ import json
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, date, timedelta
-from pandas.tseries.holiday import USFederalHolidayCalendar
+from datetime import datetime, date
+from functools import lru_cache
 
 
 def today_et():
@@ -76,22 +87,206 @@ def today_et():
     return datetime.now(pytz.timezone("America/New_York")).date()
 
 
+def state_reported_market_date(state):
+    """Return the last market date successfully reported, if one is recorded."""
+    raw = (state.get("_meta") or {}).get("last_reported_market_date")
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def required_data_missing(expected_date, source_dates):
+    """List sources whose most recent row is not the required completed session."""
+    return [name for name, source_date in source_dates.items()
+            if source_date is None or source_date != expected_date]
+
+
+@lru_cache(maxsize=1)
+def xnyse_calendar():
+    """Canonical NYSE session calendar (holidays and early closes included)."""
+    import exchange_calendars as xcals
+    return xcals.get_calendar("XNYS")
+
+
+def latest_completed_market_session(current_et, grace_minutes=15):
+    """Most recent XNYS session whose official close is at least `grace` old.
+
+    The grace period is a publication buffer, not a claim that Yahoo certifies a
+    final bar. It prevents a pre-close manual run from consuming today's partial
+    row and gives post-close providers time to publish the session.
+    """
+    cal = xnyse_calendar()
+    today_ts = pd.Timestamp(current_et.date())
+    if cal.is_session(today_ts):
+        close_et = cal.session_close(today_ts).tz_convert("America/New_York")
+        if pd.Timestamp(current_et) >= close_et + pd.Timedelta(grace_minutes, unit="min"):
+            return current_et.date()
+        return cal.previous_session(today_ts).date()
+    return cal.date_to_session(today_ts, direction="previous").date()
+
+
+def frame_through_session(df, session_date):
+    """Drop any intraday/current-session row newer than the completed session."""
+    if df is None or df.empty:
+        return df
+    keep = [pd.Timestamp(v).date() <= session_date for v in df.index]
+    return df.loc[keep]
+
+
+def _normalized_session_index(index):
+    """Return timezone-naive dates suitable for XNYS comparisons."""
+    idx = pd.DatetimeIndex(pd.to_datetime(index))
+    if idx.tz is not None:
+        idx = idx.tz_convert("America/New_York").tz_localize(None)
+    return idx.normalize()
+
+
+def assert_recent_session_continuity(df, label, end_session, session_count,
+                                     columns=None, start_session=None):
+    """Fail closed when a required XNYS session is absent from a daily series.
+
+    A current-date metadata quote is not enough: if Yahoo silently omits an
+    intermediate row, daily returns and rolling volatility compress a multi-day
+    move into one observation. For a multi-column basket, every requested ticker
+    must have a finite value on every required session.
+    """
+    if df is None or df.empty:
+        raise ValueError(f"{label} has no data for continuity validation")
+    cal = xnyse_calendar()
+    end_ts = pd.Timestamp(end_session)
+    if not cal.is_session(end_ts):
+        raise ValueError(f"{end_session} is not an XNYS session")
+    if start_session is None:
+        # exchange-calendars interprets a negative count as the total window
+        # length including `end_ts` (for example, -350 returns 350 sessions).
+        expected = cal.sessions_window(end_ts, -int(session_count))
+    else:
+        start_ts = cal.date_to_session(pd.Timestamp(start_session), direction="next")
+        expected = cal.sessions_in_range(start_ts, end_ts)
+    expected = _normalized_session_index(expected).unique().sort_values()
+
+    work = df.copy()
+    work.index = _normalized_session_index(work.index)
+    required_columns = list(columns) if columns is not None else list(work.columns)
+    missing_columns = [c for c in required_columns if c not in work.columns]
+    if missing_columns:
+        raise ValueError(f"{label} is missing columns: {', '.join(missing_columns)}")
+    valid = work[required_columns].apply(pd.to_numeric, errors="coerce").notna().all(axis=1)
+    observed = (_normalized_session_index(work.index[valid.to_numpy()])
+                .unique().sort_values())
+    missing = expected.difference(observed)
+    if len(missing):
+        sample = ", ".join(ts.date().isoformat() for ts in missing[:5])
+        more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+        raise ValueError(
+            f"{label} is missing {len(missing)} required XNYS session(s): {sample}{more}")
+    return True
+
+
+def regular_close_from_metadata(meta, ticker, session_date, tolerance_minutes=5,
+                                allow_late_index_timestamp=False):
+    """Validate Yahoo's regular-session close metadata for one XNYS session.
+
+    `regularMarketPrice` is deliberately used instead of `lastPrice`, which can
+    be an after-hours trade. The timestamp must line up with the exchange's
+    official session close. Yahoo remains an unofficial data source, but this is
+    materially stronger than accepting any daily row carrying today's date.
+    """
+    raw_price = meta.get("regularMarketPrice")
+    raw_time = meta.get("regularMarketTime")
+    try:
+        price = float(raw_price)
+        if isinstance(raw_time, (pd.Timestamp, datetime)):
+            quote_time = pd.Timestamp(raw_time)
+            if quote_time.tzinfo is None:
+                quote_time = quote_time.tz_localize("America/New_York")
+            quote_time = quote_time.tz_convert("UTC")
+        else:
+            quote_time = pd.to_datetime(int(raw_time), unit="s", utc=True)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"{ticker} regular-close metadata is incomplete") from e
+    if not np.isfinite(price) or price <= 0:
+        raise ValueError(f"{ticker} regularMarketPrice is invalid: {raw_price}")
+    expected_close = xnyse_calendar().session_close(pd.Timestamp(session_date))
+    if quote_time.date() != expected_close.date():
+        raise ValueError(
+            f"{ticker} regularMarketTime {quote_time} is not session {session_date}")
+    signed_delta = (quote_time - expected_close).total_seconds()
+    if allow_late_index_timestamp:
+        # Nasdaq index closing values can be corrected through 5:15 PM ET.
+        # Yahoo's Nasdaq Composite metadata is therefore accepted only once its timestamp
+        # reaches that final-correction boundary, never from a preliminary 4 PM
+        # value carrying the correct calendar date.
+        quote_et = quote_time.tz_convert("America/New_York")
+        final_boundary = pd.Timestamp(
+            f"{session_date.isoformat()} 17:15:00", tz="America/New_York")
+        invalid_time = quote_et < final_boundary
+    else:
+        invalid_time = abs(signed_delta) > tolerance_minutes * 60
+    if invalid_time:
+        reason = ("is earlier than Nasdaq's 5:15 PM final-correction boundary"
+                  if allow_late_index_timestamp
+                  else f"is {signed_delta:.0f}s from session close")
+        raise ValueError(
+            f"{ticker} regularMarketTime {quote_time} {reason}")
+    return price
+
+
+def fetch_yahoo_regular_close(ticker, session_date, allow_late_index_timestamp=False):
+    import yfinance as yf
+    meta = yf.Ticker(ticker).get_history_metadata()
+    return regular_close_from_metadata(
+        meta, ticker, session_date,
+        allow_late_index_timestamp=allow_late_index_timestamp)
+
+
+def ensure_session_close(df, ticker, session_date, column="Close",
+                         allow_late_index_timestamp=False):
+    """Cross-check or fill a Yahoo daily close using regular-close metadata."""
+    out = df.copy()
+    idx = pd.to_datetime(out.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_convert("America/New_York").tz_localize(None)
+    out.index = idx.normalize()
+    session_ts = pd.Timestamp(session_date)
+    quote_close = fetch_yahoo_regular_close(
+        ticker, session_date,
+        allow_late_index_timestamp=allow_late_index_timestamp)
+    existing = None
+    if session_ts in out.index and column in out.columns:
+        raw = out.loc[session_ts, column]
+        if isinstance(raw, pd.Series):
+            raw = raw.dropna().iloc[-1] if not raw.dropna().empty else np.nan
+        if pd.notna(raw):
+            existing = float(raw)
+    if existing is not None:
+        rel_gap = abs(existing / quote_close - 1.0)
+        if rel_gap > 0.0005:  # 5 bp: enough for rounding, not a different print.
+            raise ValueError(
+                f"{ticker} daily close {existing} disagrees with regular close "
+                f"{quote_close} by {rel_gap:.3%}")
+    out.loc[session_ts, column] = quote_close
+    return out.sort_index()
+
+
+def ensure_basket_session_closes(df, tickers, session_date):
+    """Validate/fill every Top-7 close from its regular-session metadata."""
+    out = df.copy()
+    for ticker in tickers:
+        out = ensure_session_close(out, ticker, session_date, column=ticker)
+    return out
+
+
 def trading_days_missed(latest_d, today_d):
-    """Count NYSE trading days between latest_d (exclusive) and today_d (inclusive)
-    that should have produced data. Accounts for weekends + US federal holidays.
-    Returns 0 if data is fresh (latest_d is the most recent expected trading day)."""
+    """Count XNYS sessions from after latest_d through today_d, inclusive."""
     if today_d <= latest_d:
         return 0
-    cal = USFederalHolidayCalendar()
-    holidays = set(cal.holidays(start=pd.Timestamp(latest_d),
-                                 end=pd.Timestamp(today_d) + pd.Timedelta(days=1)).date)
-    d = latest_d + timedelta(days=1)
-    count = 0
-    while d <= today_d:
-        if d.weekday() < 5 and d not in holidays:
-            count += 1
-        d += timedelta(days=1)
-    return count
+    cal = xnyse_calendar()
+    start = pd.Timestamp(latest_d) + pd.Timedelta(1, unit="D")
+    return len(cal.sessions_in_range(start, pd.Timestamp(today_d)))
 
 
 # ============================
@@ -495,7 +690,7 @@ def _format_days_in_strategy(currently, walker_state, fallback_first_date,
     position changes are pending (signal vs executed)."""
     if flipped_today and prev_position and prev_position != currently:
         return (f"<i>⚠️ FLIP TODAY: signal switched to <b>{currently}</b>. "
-                f"You still HOLD <b>{prev_position}</b> until tomorrow's MOC executes.</i>")
+                f"You still HOLD <b>{prev_position}</b> until the next-session MOC executes.</i>")
     n_days, exact = days_in_strategy(walker_state, fallback_first_date)
     if exact:
         ltd = walker_state["last_transition_date"]
@@ -603,8 +798,8 @@ def render_top7_section(label_prefix, params, st, fallback_first_date, unrate_fa
         if unrate_failed:
             target = f"{target} ⚠️"
     if flipped_today and prev_position and prev_position != target:
-        lines.append(f"➤ <b>HOLD NOW: {prev_position}</b>  (until tomorrow's MOC)")
-        lines.append(f"➤ <b>TOMORROW MOC: SELL {prev_position} → BUY {target}</b>")
+        lines.append(f"➤ <b>HOLD NOW: {prev_position}</b>  (until next-session MOC)")
+        lines.append(f"➤ <b>NEXT-SESSION MOC: SELL {prev_position} → BUY {target}</b>")
     else:
         lines.append(f"➤ <b>HOLD: {target}</b>")
     if st["state"] == "invested":
@@ -652,8 +847,8 @@ def render_lev_section(label, params, st, fallback_first_date,
     lines.append(f"<i>MA{ma_n} v&lt;{vt}% e={el} r={rl} | leveraged: {lev} | defensive: {defv}</i>")
     target = lev if st["state"] == "invested" else defv
     if flipped_today and prev_position and prev_position != target:
-        lines.append(f"➤ <b>HOLD NOW: {prev_position}</b>  (until tomorrow's MOC)")
-        lines.append(f"➤ <b>TOMORROW MOC: SELL {prev_position} → BUY {target}</b>")
+        lines.append(f"➤ <b>HOLD NOW: {prev_position}</b>  (until next-session MOC)")
+        lines.append(f"➤ <b>NEXT-SESSION MOC: SELL {prev_position} → BUY {target}</b>")
     else:
         lines.append(f"➤ <b>HOLD: {target}</b>")
     exit_rule = f"{sig} &lt; SMA{ma_n} OR {sig} vol20 ≥ {vt}%"
@@ -808,9 +1003,9 @@ def build_summary_block(prev_state, new_state, conditions_line):
     lines = []
     if flips:
         n = len(flips)
-        today_dow = today_et().weekday()
-        nxt_label = "MONDAY" if today_dow >= 4 else "tomorrow"
-        lines.append(f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''} at MOC {nxt_label} (before 3:50pm ET)</b>")
+        lines.append(
+            f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''} at the "
+            "NEXT MARKET-SESSION MOC (submit before your broker's cutoff)</b>")
         lines.append(conditions_line)
         for lbl, frm, to in flips:
             lines.append(f"  • <b>SELL {frm}, BUY {to}</b>  ({lbl})")
@@ -855,32 +1050,72 @@ def build_summary_block(prev_state, new_state, conditions_line):
 # Main
 # ============================
 
-def main():
+def main(current_et=None):
     manual_run = os.environ.get("MANUAL_RUN", "").lower() == "true"
+    final_attempt = os.environ.get("FINAL_ATTEMPT", "").lower() == "true"
+    force_repeat = os.environ.get("FORCE_REPEAT", "").lower() == "true"
+    force_partial = os.environ.get("FORCE_PARTIAL_DATA", "").lower() == "true"
     import pytz
     et_tz = pytz.timezone("America/New_York")
-    current_et = datetime.now(et_tz)
-    in_window = (current_et.hour == 16 and current_et.minute >= 5) or (17 <= current_et.hour <= 20)
-    if not manual_run and not in_window:
-        print(f"Skipping - current ET time is {current_et.strftime('%I:%M %p')}, not within 4:05-8:59 PM window")
-        return
+    current_et = current_et or datetime.now(et_tz)
+    expected_session = latest_completed_market_session(current_et)
 
     bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
+    prev = load_state()
+    if not force_repeat and state_reported_market_date(prev) == expected_session:
+        print(f"Skipping - market session {expected_session} was already reported")
+        return
+
     health = {"SPY": False, "QQQ": False, "NASDAQCOM": False, "UNRATE": False}
 
     try:
-        spy_df = fetch_etf("SPY"); health["SPY"] = True
+        # The audited strategy uses Yahoo adjusted closes. Automated runs fail
+        # closed rather than silently switching to Stooq's different series.
+        spy_df = (fetch_etf("SPY") if force_partial else fetch_etf_yfinance("SPY"))
+        spy_df = frame_through_session(spy_df, expected_session)
+        if not force_partial:
+            spy_df = ensure_session_close(spy_df, "SPY", expected_session)
+        if spy_df is None or spy_df.empty:
+            raise ValueError(f"SPY has no row through required session {expected_session}")
+        if not force_partial:
+            assert_recent_session_continuity(
+                spy_df, "SPY", expected_session, 350, columns=["Close"])
+        health["SPY"] = True
     except Exception as e:
-        send_telegram(bot_token, chat_id, f"<b>⚠️ Bot error</b>\nSPY fetch failed: {e}\nRun aborted; positions retained.")
-        return
+        if not force_partial and not (final_attempt or manual_run):
+            print(f"Deferring scheduled report - SPY input is not ready: {e}")
+            return
+        raise
     try:
-        qqq_df = fetch_etf("QQQ"); health["QQQ"] = True
+        qqq_df = (fetch_etf("QQQ") if force_partial else fetch_etf_yfinance("QQQ"))
+        qqq_df = frame_through_session(qqq_df, expected_session)
+        if not force_partial:
+            qqq_df = ensure_session_close(qqq_df, "QQQ", expected_session)
+        if qqq_df is None or qqq_df.empty:
+            raise ValueError(f"QQQ has no row through required session {expected_session}")
+        if not force_partial:
+            assert_recent_session_continuity(
+                qqq_df, "QQQ", expected_session, 350, columns=["Close"])
+        health["QQQ"] = True
     except Exception as e:
         print(f"WARN: QQQ fetch failed: {e}"); qqq_df = None
     try:
-        nasdaqcom_df = fetch_nasdaqcom(); health["NASDAQCOM"] = True
+        nasdaqcom_df = (fetch_nasdaqcom() if force_partial
+                        else fetch_nasdaqcom_yfinance())
+        nasdaqcom_df = frame_through_session(nasdaqcom_df, expected_session)
+        if not force_partial:
+            nasdaqcom_df = ensure_session_close(
+                nasdaqcom_df, "^IXIC", expected_session, column="NASDAQCOM",
+                allow_late_index_timestamp=True)
+        if nasdaqcom_df is None or nasdaqcom_df.empty:
+            raise ValueError(f"NASDAQCOM has no row through required session {expected_session}")
+        if not force_partial:
+            assert_recent_session_continuity(
+                nasdaqcom_df, "NASDAQCOM", expected_session, 350,
+                columns=["NASDAQCOM"])
+        health["NASDAQCOM"] = True
     except Exception as e:
         print(f"WARN: NASDAQCOM fetch failed: {e}"); nasdaqcom_df = None
     try:
@@ -888,11 +1123,17 @@ def main():
     except Exception as e:
         print(f"WARN: UNRATE fetch failed: {e}"); un = None
 
+    if (un is None or len(un) < 4) and not force_partial:
+        msg = "UNRATE input is unavailable or has fewer than four observations"
+        if final_attempt or manual_run:
+            raise RuntimeError(msg)
+        print(f"Deferring scheduled report - {msg}")
+        return
+
     spy_close = spy_df["Close"].copy()
     spy_close.index = pd.to_datetime(spy_close.index).normalize()
     latest_date = spy_close.index[-1]
     latest_close = float(spy_close.iloc[-1])
-    prev = load_state()
     today_d = current_et.date()
     latest_d = latest_date.date() if isinstance(latest_date, pd.Timestamp) else latest_date
 
@@ -958,6 +1199,18 @@ def main():
     qqq_signal_fresh = qqq_last_d is not None and qqq_last_d >= latest_d
     nasdaqcom_signal_fresh = nasdaqcom_last_d is not None and nasdaqcom_last_d >= latest_d
 
+    missing_required = required_data_missing(
+        expected_session,
+        {"SPY": latest_d, "QQQ": qqq_last_d, "NASDAQCOM": nasdaqcom_last_d},
+    )
+    if missing_required and not force_partial:
+        msg = (f"required session {expected_session} is not available for: "
+               f"{', '.join(missing_required)}")
+        if final_attempt or manual_run:
+            raise RuntimeError(msg)
+        print(f"Deferring scheduled report - {msg}")
+        return
+
     # UNRATE delta
     if un is not None and len(un) >= 4:
         un_now_rate = float(un.iloc[-1]["UNRATE"])
@@ -977,13 +1230,34 @@ def main():
     ratchet = None
     ratchet_warn = None
     try:
-        _cfg, ratchet_warn = load_basket_config(TOP7_RATCHET_PARAMS["basket_file"], pd.Timestamp.today())
-        if _cfg is not None:
-            _closes = fetch_basket_closes([h["ticker"] for h in _cfg["holdings"]])
-            _nav = compute_basket_nav(_cfg, _closes)
-            ratchet = walk_ratchet_state(_nav, TOP7_RATCHET_PARAMS["arm_gain"],
-                                         TOP7_RATCHET_PARAMS["stop_drop"])
+        _cfg, ratchet_warn = load_basket_config(
+            TOP7_RATCHET_PARAMS["basket_file"], pd.Timestamp(expected_session))
+        if _cfg is None:
+            raise RuntimeError(ratchet_warn or "Top-7 basket config is unavailable")
+        _tickers = [h["ticker"] for h in _cfg["holdings"]]
+        _closes = fetch_basket_closes(_tickers)
+        _closes = frame_through_session(_closes, expected_session)
+        if not force_partial:
+            _closes = ensure_basket_session_closes(
+                _closes, _tickers, expected_session)
+            assert_recent_session_continuity(
+                _closes, "Top-7 basket", expected_session, 1,
+                columns=_tickers, start_session=_cfg["baseline_date"])
+        _nav = compute_basket_nav(_cfg, _closes)
+        _nav_latest = pd.Timestamp(_nav.index[-1]).date()
+        missing_required = required_data_missing(
+            expected_session, {"Top-7 basket": _nav_latest})
+        if missing_required and not force_partial:
+            raise RuntimeError(
+                f"required session {expected_session} is not available for the Top-7 basket")
+        ratchet = walk_ratchet_state(_nav, TOP7_RATCHET_PARAMS["arm_gain"],
+                                     TOP7_RATCHET_PARAMS["stop_drop"])
     except Exception as e:
+        if not force_partial:
+            if final_attempt or manual_run:
+                raise
+            print(f"Deferring scheduled report - ratchet input is not ready: {e}")
+            return
         ratchet = None
         ratchet_warn = f"ratchet computation failed ({e}) — Roth D-asym signal shown alone"
     if ratchet is not None and ratchet["fired"]:
@@ -1106,6 +1380,10 @@ def main():
     summary_block = build_summary_block(prev, new_state, conditions_line)
 
     lines = [f"<b>📊 {ACCOUNT_LABEL}</b>", f"{latest_date.strftime('%Y-%m-%d')}"]
+    if force_partial:
+        lines.append(
+            "⚠️ <b>FORCED INCOMPLETE-DATA DIAGNOSTIC</b> — do not treat this "
+            "as a close-confirmed action alert. State will not be saved.")
     if stale_warning:
         lines.append(stale_warning)
     lines.extend(summary_block)
@@ -1225,6 +1503,22 @@ def main():
         lines.append("⚠️ <b>SEVERE STALENESS</b>: " + "; ".join(severe) + ". Verify before acting.")
 
     send_telegram(bot_token, chat_id, "\n".join(lines))
+    if force_partial:
+        print("Forced incomplete-data diagnostic sent; state intentionally not saved")
+        return
+    meta = dict(prev.get("_meta") or {})
+    meta["last_reported_market_date"] = expected_session.isoformat()
+    meta["last_reported_at_et"] = current_et.isoformat()
+    meta["source_dates"] = {
+        "SPY": latest_d.isoformat(),
+        "QQQ": qqq_last_d.isoformat(),
+        "NASDAQCOM": nasdaqcom_last_d.isoformat(),
+        "TOP7_BASKET": _nav_latest.isoformat(),
+    }
+    meta["price_gate"] = (
+        "Yahoo regularMarketPrice metadata checked at the exchange close; "
+        "Nasdaq Composite accepted only after its 5:15 PM correction window")
+    new_state["_meta"] = meta
     save_state(new_state)
     print(f"State saved to {STATE_FILE}")
 

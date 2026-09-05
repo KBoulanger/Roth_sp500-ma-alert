@@ -2,17 +2,34 @@ name: Daily SPY SMA Telegram
 
 on:
   schedule:
-    # Runs at 22:05 UTC weekdays (M-F).
-    # Translates to:
-    #   EST (winter):  17:05 ET = 5:05 PM ET — 1h+ buffer after market close, yfinance has today's data
-    #   EDT (summer):  18:05 ET = 6:05 PM ET — 2h+ buffer
-    # Previous schedule (21:05 UTC) ran at 4:05 PM ET in winter — only 5 min after close,
-    # which sometimes meant yfinance hadn't published today's close yet.
-    - cron: '5 22 * * 1-5'
+    # Fixed-Eastern post-close retries. Nasdaq's official index close can still
+    # be corrected through 5:15 PM ET, so the full portfolio monitor deliberately
+    # waits until after that deadline rather than treating a 4 PM value as final.
+    - cron: '20,40 17 * * 1-5'
+      timezone: "America/New_York"
+    # Final strict attempt. A missing source fails closed and triggers the existing
+    # Telegram workflow-failure alert instead of advancing only part of the state.
+    - cron: '10 18 * * 1-5'
+      timezone: "America/New_York"
   workflow_dispatch:
+    inputs:
+      force_repeat:
+        description: "Send the completed session again even if already reported"
+        required: false
+        default: false
+        type: boolean
+      force_partial_data:
+        description: "Unsafe diagnostic only: permit incomplete/stale daily inputs"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write  # required to commit updated state.json back to the repo
+
+concurrency:
+  group: daily-spy-sma-telegram
+  cancel-in-progress: false
 
 jobs:
   run:
@@ -20,6 +37,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Scheduled retries must see a state commit made by an earlier run.
+          ref: ${{ github.event.repository.default_branch }}
 
       - uses: actions/setup-python@v5
         with:
@@ -29,6 +49,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Scheduler safety tests
+        run: python -m unittest -v test_scheduler.py
+
       - id: bot
         run: python send_spy_ma_telegram.py
         env:
@@ -36,20 +59,9 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           MANUAL_RUN: ${{ github.event_name == 'workflow_dispatch' }}
-
-      # Telegram alert if the bot itself crashed (e.g., dependency break, all data sources down).
-      # Without this, a silent crash means no Telegram messages and the user won't know
-      # unless they happen to check GitHub Actions email notifications.
-      - name: Notify on bot failure
-        if: failure() && steps.bot.conclusion == 'failure'
-        run: |
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d parse_mode="HTML" \
-            --data-urlencode "text=🚨 <b>BOT FAILURE</b> — daily run failed on $(date -u +'%Y-%m-%d %H:%M UTC'). Positions retained from prior run. Check workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FINAL_ATTEMPT: ${{ github.event_name == 'schedule' && github.event.schedule == '10 18 * * 1-5' }}
+          FORCE_REPEAT: ${{ inputs.force_repeat || false }}
+          FORCE_PARTIAL_DATA: ${{ inputs.force_partial_data || false }}
 
       - name: Commit updated state.json
         if: success()
@@ -65,3 +77,16 @@ jobs:
               git push
             fi
           fi
+
+      # Alert on either signal/data failure or failure to persist state. The latter
+      # matters because an uncommitted idempotency key could duplicate the report.
+      - name: Notify on workflow or state-persistence failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode="HTML" \
+            --data-urlencode "text=🚨 <b>BOT FAILURE</b> — run or state persistence failed on $(date -u +'%Y-%m-%d %H:%M UTC'). Do not infer a position change. Check workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

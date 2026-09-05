@@ -89,5 +89,8 @@
     "reentry_threshold": 1,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
+  },
+  "_meta": {
+    "last_reported_market_date": "2026-09-04"
   }
 }
