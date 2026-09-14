@@ -20,7 +20,7 @@
     "ratchet_armed": true,
     "ratchet_fired": true,
     "ratchet_hwm": 6.845822378245051,
-    "ratchet_nav": 4.859363506947434,
+    "ratchet_nav": 4.61746557566654,
     "ratchet_locked": true,
     "signal_position": "SP500",
     "actual_position": "SP500"
@@ -41,7 +41,7 @@
         50
       ]
     ],
-    "reentry_streak": 108,
+    "reentry_streak": 109,
     "reentry_threshold": 5,
     "signal_position": "TOP-7 STOCKS",
     "actual_position": "TOP-7 STOCKS"
@@ -52,7 +52,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 332,
+    "reentry_streak": 333,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -63,7 +63,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 332,
+    "reentry_streak": 333,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -74,7 +74,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 4,
-    "reentry_streak": 45,
+    "reentry_streak": 46,
     "reentry_threshold": 1,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
@@ -85,19 +85,19 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 4,
-    "reentry_streak": 45,
+    "reentry_streak": 46,
     "reentry_threshold": 1,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
   },
   "_meta": {
-    "last_reported_market_date": "2026-09-11",
-    "last_reported_at_et": "2026-09-11T19:20:04.652759-04:00",
+    "last_reported_market_date": "2026-09-14",
+    "last_reported_at_et": "2026-09-14T19:53:46.890511-04:00",
     "source_dates": {
-      "SPY": "2026-09-11",
-      "QQQ": "2026-09-11",
-      "NASDAQCOM": "2026-09-11",
-      "TOP7_BASKET": "2026-09-11"
+      "SPY": "2026-09-14",
+      "QQQ": "2026-09-14",
+      "NASDAQCOM": "2026-09-14",
+      "TOP7_BASKET": "2026-09-14"
     },
     "price_gate": "Yahoo regularMarketPrice metadata checked at the exchange close; Nasdaq Composite accepted only after its 5:15 PM correction window"
   }
