@@ -19,8 +19,8 @@
     "reentry_threshold": 5,
     "ratchet_armed": true,
     "ratchet_fired": true,
-    "ratchet_hwm": 6.845822378245051,
-    "ratchet_nav": 5.557914795366382,
+    "ratchet_hwm": 6.845688336201858,
+    "ratchet_nav": 5.2729656911059415,
     "ratchet_locked": true,
     "signal_position": "SP500",
     "actual_position": "SP500"
@@ -41,7 +41,7 @@
         50
       ]
     ],
-    "reentry_streak": 115,
+    "reentry_streak": 118,
     "reentry_threshold": 5,
     "signal_position": "TOP-7 STOCKS",
     "actual_position": "TOP-7 STOCKS"
@@ -52,7 +52,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 339,
+    "reentry_streak": 342,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -63,7 +63,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 339,
+    "reentry_streak": 342,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -74,7 +74,7 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 4,
-    "reentry_streak": 52,
+    "reentry_streak": 55,
     "reentry_threshold": 1,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
@@ -85,19 +85,19 @@
     "position": "TQQQ",
     "exit_streak": 0,
     "exit_threshold": 4,
-    "reentry_streak": 52,
+    "reentry_streak": 55,
     "reentry_threshold": 1,
     "signal_position": "TQQQ",
     "actual_position": "TQQQ"
   },
   "_meta": {
-    "last_reported_market_date": "2026-09-22",
-    "last_reported_at_et": "2026-09-22T19:37:33.062096-04:00",
+    "last_reported_market_date": "2026-09-25",
+    "last_reported_at_et": "2026-09-25T19:57:53.862867-04:00",
     "source_dates": {
-      "SPY": "2026-09-22",
-      "QQQ": "2026-09-22",
-      "NASDAQCOM": "2026-09-22",
-      "TOP7_BASKET": "2026-09-22"
+      "SPY": "2026-09-25",
+      "QQQ": "2026-09-25",
+      "NASDAQCOM": "2026-09-25",
+      "TOP7_BASKET": "2026-09-25"
     },
     "price_gate": "Yahoo regularMarketPrice metadata checked at the exchange close; Nasdaq Composite accepted only after its 5:15 PM correction window"
   }
