@@ -20,7 +20,7 @@
     "ratchet_armed": true,
     "ratchet_fired": true,
     "ratchet_hwm": 6.845619805226761,
-    "ratchet_nav": 3.5356892195573506,
+    "ratchet_nav": 3.3080103170699875,
     "ratchet_locked": true,
     "signal_position": "SP500",
     "actual_position": "SP500"
@@ -52,7 +52,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 367,
+    "reentry_streak": 368,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -63,7 +63,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 367,
+    "reentry_streak": 368,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -72,7 +72,7 @@
     "label": "QQQ Leveraged (Roth)",
     "state": "invested",
     "position": "TQQQ",
-    "exit_streak": 1,
+    "exit_streak": 2,
     "exit_threshold": 4,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -83,7 +83,7 @@
     "label": "QQQ Leveraged (Brok)",
     "state": "invested",
     "position": "TQQQ",
-    "exit_streak": 1,
+    "exit_streak": 2,
     "exit_threshold": 4,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -91,13 +91,13 @@
     "actual_position": "TQQQ"
   },
   "_meta": {
-    "last_reported_market_date": "2026-10-30",
-    "last_reported_at_et": "2026-10-30T20:51:57.081751-04:00",
+    "last_reported_market_date": "2026-11-02",
+    "last_reported_at_et": "2026-11-02T22:29:38.430253-05:00",
     "source_dates": {
-      "SPY": "2026-10-30",
-      "QQQ": "2026-10-30",
-      "NASDAQCOM": "2026-10-30",
-      "TOP7_BASKET": "2026-10-30"
+      "SPY": "2026-11-02",
+      "QQQ": "2026-11-02",
+      "NASDAQCOM": "2026-11-02",
+      "TOP7_BASKET": "2026-11-02"
     },
     "price_gate": "Yahoo regularMarketPrice metadata checked at the exchange close; Nasdaq Composite accepted only after its 5:15 PM correction window"
   }
