@@ -20,7 +20,7 @@
     "ratchet_armed": true,
     "ratchet_fired": true,
     "ratchet_hwm": 6.845619805226761,
-    "ratchet_nav": 2.5180176795040907,
+    "ratchet_nav": 2.603729671641643,
     "ratchet_locked": true,
     "signal_position": "SP500",
     "actual_position": "SP500"
@@ -52,7 +52,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 371,
+    "reentry_streak": 372,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -63,7 +63,7 @@
     "position": "UPRO",
     "exit_streak": 0,
     "exit_threshold": 1,
-    "reentry_streak": 371,
+    "reentry_streak": 372,
     "reentry_threshold": 1,
     "signal_position": "UPRO",
     "actual_position": "UPRO"
@@ -72,7 +72,7 @@
     "label": "QQQ Leveraged (Roth)",
     "state": "defensive",
     "position": "USFR",
-    "exit_streak": 1,
+    "exit_streak": 2,
     "exit_threshold": 4,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -83,7 +83,7 @@
     "label": "QQQ Leveraged (Brok)",
     "state": "defensive",
     "position": "USFR",
-    "exit_streak": 1,
+    "exit_streak": 2,
     "exit_threshold": 4,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -91,13 +91,13 @@
     "actual_position": "USFR"
   },
   "_meta": {
-    "last_reported_market_date": "2026-11-05",
-    "last_reported_at_et": "2026-11-05T21:33:08.173692-05:00",
+    "last_reported_market_date": "2026-11-06",
+    "last_reported_at_et": "2026-11-06T20:59:55.457994-05:00",
     "source_dates": {
-      "SPY": "2026-11-05",
-      "QQQ": "2026-11-05",
-      "NASDAQCOM": "2026-11-05",
-      "TOP7_BASKET": "2026-11-05"
+      "SPY": "2026-11-06",
+      "QQQ": "2026-11-06",
+      "NASDAQCOM": "2026-11-06",
+      "TOP7_BASKET": "2026-11-06"
     },
     "price_gate": "Yahoo regularMarketPrice metadata checked at the exchange close; Nasdaq Composite accepted only after its 5:15 PM correction window"
   }
