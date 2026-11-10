@@ -1,0 +1,65 @@
+name: Leveraged Early Alert
+
+# Fast post-close check for the UPRO/TQQQ sleeves only, so same-day trades
+# (all re-entries + TQQQ exits, adopted 2026-11-09) can be placed after hours.
+# Read-only w.r.t. state.json; sends Telegram only when a leveraged signal flips.
+#
+# NOTE: GitHub's scheduler has been starting the 5:20 PM monitor 3-4 hours late.
+# The cron below is best-effort; for a reliable ~4:20 PM alert, trigger this
+# workflow externally via workflow_dispatch (e.g. `gh workflow run letf_early.yml`).
+
+on:
+  schedule:
+    - cron: '23,47 16 * * 1-5'
+      timezone: "America/New_York"
+  workflow_dispatch:
+
+permissions:
+  contents: write  # commit early_alert.json (dedupe marker)
+
+concurrency:
+  group: daily-spy-sma-telegram
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Scheduler safety tests
+        run: python -m unittest -v test_scheduler.py
+
+      - name: Early leveraged check
+        run: python send_spy_ma_telegram.py
+        env:
+          LETF_EARLY: "true"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Commit early_alert.json
+        if: success()
+        run: |
+          if [ -f early_alert.json ]; then
+            git config user.name "telegram-bot"
+            git config user.email "bot@github-actions"
+            git add early_alert.json
+            if git diff --staged --quiet; then
+              echo "No early-alert changes to commit."
+            else
+              git commit -m "early alert $(date -u +%Y-%m-%d)"
+              git pull --rebase
+              git push
+            fi
+          fi

@@ -243,5 +243,34 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("yfinance==1.7.0", requirements)
 
 
+
+class ExecutionTimingTests(unittest.TestCase):
+    def test_execution_mode_per_sleeve(self):
+        self.assertEqual(bot.execution_mode("spy_lev_roth", "USFR"), "next_close")
+        self.assertEqual(bot.execution_mode("spy_lev_brok", "UPRO"), "same_day")
+        self.assertEqual(bot.execution_mode("qqq_lev_roth", "USFR"), "same_day")
+        self.assertEqual(bot.execution_mode("qqq_lev_brok", "TQQQ"), "same_day")
+        self.assertEqual(bot.execution_mode("top7_roth", "SP500"), "next_close")
+
+    def test_same_day_flip_switches_holding_immediately(self):
+        prev = {"qqq_lev_roth": {"position": "TQQQ", "actual_position": "TQQQ"}}
+        new = {"qqq_lev_roth": {"label": "QQQ", "position": "USFR"}}
+        out = bot.apply_actual_vs_signal_state(prev, new, date(2026, 11, 4))
+        self.assertEqual(out["qqq_lev_roth"]["actual_position"], "USFR")
+        self.assertIn("executed_order", out["qqq_lev_roth"])
+        self.assertNotIn("pending_order", out["qqq_lev_roth"])
+
+    def test_next_close_flip_stays_pending_then_executes(self):
+        prev = {"spy_lev_roth": {"position": "UPRO", "actual_position": "UPRO"}}
+        new = {"spy_lev_roth": {"label": "SPY", "position": "USFR"}}
+        out = bot.apply_actual_vs_signal_state(prev, new, date(2026, 11, 9))
+        self.assertEqual(out["spy_lev_roth"]["actual_position"], "UPRO")
+        self.assertEqual(out["spy_lev_roth"]["pending_order"]["buy"], "USFR")
+        nxt = {"spy_lev_roth": {"label": "SPY", "position": "USFR"}}
+        out2 = bot.apply_actual_vs_signal_state(out, nxt, date(2026, 11, 10))
+        self.assertEqual(out2["spy_lev_roth"]["actual_position"], "USFR")
+        self.assertNotIn("pending_order", out2["spy_lev_roth"])
+
+
 if __name__ == "__main__":
     unittest.main()
