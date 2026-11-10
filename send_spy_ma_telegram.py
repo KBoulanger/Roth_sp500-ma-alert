@@ -2,6 +2,24 @@
 
 Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
 
+  Execution timing + early alert (2026-11-09):
+    + Leveraged sleeves now carry explicit execution timing (EXECUTION_TIMING):
+        UPRO: exit at NEXT-day close (MOC); re-entry SAME day, minutes after close.
+        TQQQ: exit and re-entry SAME day, minutes after the 4:00 PM close.
+      Top-7 sleeves unchanged (next-session MOC). Same-day flips are recorded as
+      `executed_order` (holding switches immediately); next-close flips keep
+      `pending_order`. Backtest basis (synthetic 3x, 0.08%/switch, T-bill
+      defensive): UPRO next-exit/same-entry 18.7% CAGR vs 17.9% next/next;
+      TQQQ same/same 26.3% vs 21.5% next/next. Re-entry same-day robust across
+      27 neighbors for both; TQQQ exit same-day only marginal (18/27 neighbors).
+    + New LETF_EARLY mode (letf_early.yml): SPY/QQQ-only check after the close,
+      read-only on state.json, Telegram only on a leveraged flip, deduped via
+      early_alert.json. GitHub cron has been firing the 5:20 PM monitor 3-4h
+      late, so trigger the early workflow externally for reliable timing.
+    + Fix: Roth Top-7 "Currently SP500 for N days" now counts from the runup
+      ratchet fire date when the ratchet lock overrides the D-asym walker
+      (previously showed the walker's last re-entry date, 2025-05-16).
+
   Scheduler hardening (2026-09-04):
     + Full-monitor attempts moved to 5:20 PM ET, with 5:40 PM and 6:10 PM
       retries. Nasdaq index corrections can run through 5:15 PM; GitHub's IANA
@@ -338,6 +356,33 @@ QQQ_LEV_PARAMS = {
     "leveraged": "TQQQ", "defensive": "USFR", "signal_asset": "QQQ",
 }
 
+# Execution timing (adopted 2026-11-09). "same_day" = trade minutes after the 4:00 PM
+# close on the signal day (after-hours, limit orders); "next_close" = next session's MOC.
+# Backtest (synthetic 3x, 0.08%/switch, T-bill defensive): re-entry same-day beat
+# next-day for both sleeves; exits: UPRO next-day wins (27/27 neighbors), TQQQ same-day
+# wins narrowly (18/27). Top-7 sleeves keep next-session MOC.
+EXECUTION_TIMING = {
+    "spy_lev_roth": {"exit": "next_close", "entry": "same_day"},
+    "spy_lev_brok": {"exit": "next_close", "entry": "same_day"},
+    "qqq_lev_roth": {"exit": "same_day", "entry": "same_day"},
+    "qqq_lev_brok": {"exit": "same_day", "entry": "same_day"},
+}
+LEV_DEFENSIVE = {"USFR"}
+
+
+def execution_mode(key, target):
+    """'same_day' or 'next_close' for a move into `target` on strategy `key`."""
+    timing = EXECUTION_TIMING.get(key)
+    if not timing:
+        return "next_close"
+    return timing["exit"] if target in LEV_DEFENSIVE else timing["entry"]
+
+
+EXEC_LABEL = {
+    "same_day": "TODAY, minutes after the 4:00 PM close (after-hours limit orders)",
+    "next_close": "at the NEXT session's close (MOC)",
+}
+
 # ============================
 # Data fetching
 # ============================
@@ -656,17 +701,28 @@ def apply_actual_vs_signal_state(prev_state, new_state, signal_date):
             # Previous next-MOC order should now be reflected in actual holdings.
             actual = pending_target
 
+        ns.pop("pending_order", None)
+        ns.pop("executed_order", None)
+        if target and actual and target != actual:
+            if execution_mode(key, target) == "same_day":
+                # Traded minutes after today's close: holdings switch immediately.
+                ns["executed_order"] = {
+                    "sell": actual,
+                    "buy": target,
+                    "signal_date": signal_date_s,
+                    "execution": "same-day after close",
+                }
+                actual = target
+            else:
+                ns["pending_order"] = {
+                    "sell": actual,
+                    "buy": target,
+                    "signal_date": signal_date_s,
+                    "execution": "next MOC",
+                }
         ns["signal_position"] = target
         ns["actual_position"] = actual
         ns["position"] = actual  # legacy field now means current holding
-        ns.pop("pending_order", None)
-        if target and actual and target != actual:
-            ns["pending_order"] = {
-                "sell": actual,
-                "buy": target,
-                "signal_date": signal_date_s,
-                "execution": "next MOC",
-            }
     return new_state
 
 
@@ -685,12 +741,19 @@ def carry_forward_guarded_state(prev_state, new_state, keys, reason):
 # ============================
 
 def _format_days_in_strategy(currently, walker_state, fallback_first_date,
-                              flipped_today=False, prev_position=None):
+                              flipped_today=False, prev_position=None, execution="next_close",
+                              since_override=None):
     """Builds the 'Currently X for N days' line. On flip day, makes clear that the
     position changes are pending (signal vs executed)."""
     if flipped_today and prev_position and prev_position != currently:
+        if execution == "same_day":
+            return (f"<i>⚠️ FLIP TODAY: signal switched to <b>{currently}</b>. "
+                    f"Trade it right after today's close (after-hours limit orders).</i>")
         return (f"<i>⚠️ FLIP TODAY: signal switched to <b>{currently}</b>. "
                 f"You still HOLD <b>{prev_position}</b> until the next-session MOC executes.</i>")
+    if since_override is not None:
+        n_days = max(0, (today_et() - since_override).days)
+        return f"<i>Currently {currently} for {n_days} days (since {since_override})</i>"
     n_days, exact = days_in_strategy(walker_state, fallback_first_date)
     if exact:
         ltd = walker_state["last_transition_date"]
@@ -833,20 +896,33 @@ def render_top7_section(label_prefix, params, st, fallback_first_date, unrate_fa
         lines.append("<u>Defensive routing</u>: ⚠️ <b>UNRATE FETCH FAILED</b> — assuming stable (→ SP500). Verify manually.")
     else:
         lines.append(f"<u>Defensive routing</u>: ΔUNRATE_3mo &gt; {params['ur_thr']}pp → Treasuries, else → SP500")
-    lines.append(_format_days_in_strategy(target, st, fallback_first_date, flipped_today, prev_position))
+    # When the ratchet lock overrides the D-asym walker, count from the ratchet fire
+    # date, not the walker's last (re-entry) transition.
+    since_override = None
+    if ratchet is not None and ratchet.get("fired") and ratchet.get("fire_date") is not None:
+        since_override = pd.Timestamp(ratchet["fire_date"]).date()
+    lines.append(_format_days_in_strategy(target, st, fallback_first_date, flipped_today, prev_position,
+                                          since_override=since_override))
     return lines
 
 
 def render_lev_section(label, params, st, fallback_first_date,
-                       flipped_today=False, prev_position=None):
+                       flipped_today=False, prev_position=None, key=None):
     lines = []
     sig = params["signal_asset"]; lev = params["leveraged"]; defv = params["defensive"]
     ma_n = params["ma"]; vt = int(params["vol_thr"] * 100)
     el = params["exit_lag"]; rl = params["entry_lag"]
+    timing = EXECUTION_TIMING.get(key, {"exit": "next_close", "entry": "next_close"})
+    tshort = {"same_day": "same-day after close", "next_close": "next-day close"}
     lines.append(f"<b>{label}</b>")
-    lines.append(f"<i>MA{ma_n} v&lt;{vt}% e={el} r={rl} | leveraged: {lev} | defensive: {defv}</i>")
+    lines.append(f"<i>MA{ma_n} v&lt;{vt}% e={el} r={rl} | leveraged: {lev} | defensive: {defv} | "
+                 f"exit: {tshort[timing['exit']]}, reentry: {tshort[timing['entry']]}</i>")
     target = lev if st["state"] == "invested" else defv
-    if flipped_today and prev_position and prev_position != target:
+    execution = execution_mode(key, target)
+    if flipped_today and prev_position and prev_position != target and execution == "same_day":
+        lines.append(f"➤ <b>ACT NOW (after-hours limit orders): SELL {prev_position} → BUY {target}</b>")
+        lines.append(f"➤ <b>THEN HOLD: {target}</b>")
+    elif flipped_today and prev_position and prev_position != target:
         lines.append(f"➤ <b>HOLD NOW: {prev_position}</b>  (until next-session MOC)")
         lines.append(f"➤ <b>NEXT-SESSION MOC: SELL {prev_position} → BUY {target}</b>")
     else:
@@ -863,7 +939,8 @@ def render_lev_section(label, params, st, fallback_first_date,
         lines.append(f"<u>Exit</u> (→ {defv}): — (rule: {el} consecutive {days_word} where {exit_rule})")
         emoji = hourglass_if_progressing(st["days_on_streak"], rl)
         lines.append(f"<u>Reentry</u> (→ {lev}): {st['days_on_streak']}/{rl} days where ({reentry_rule}) {emoji}".rstrip())
-    lines.append(_format_days_in_strategy(target, st, fallback_first_date, flipped_today, prev_position))
+    lines.append(_format_days_in_strategy(target, st, fallback_first_date, flipped_today, prev_position,
+                                          execution=execution))
     return lines
 
 
@@ -984,9 +1061,10 @@ def build_summary_block(prev_state, new_state, conditions_line):
             n_risk_on += 1
         else:
             defensive.append((ns.get("label", key), ns.get("position", "defensive")))
-        pending = ns.get("pending_order")
+        pending = ns.get("pending_order") or ns.get("executed_order")
         if pending:
-            flips.append((ns["label"], pending["sell"], pending["buy"]))
+            mode = "same_day" if ns.get("executed_order") else "next_close"
+            flips.append((ns["label"], pending["sell"], pending["buy"], mode))
             continue
         if ns.get("data_guarded"):
             continue
@@ -1003,12 +1081,10 @@ def build_summary_block(prev_state, new_state, conditions_line):
     lines = []
     if flips:
         n = len(flips)
-        lines.append(
-            f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''} at the "
-            "NEXT MARKET-SESSION MOC (submit before your broker's cutoff)</b>")
+        lines.append(f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''}</b>")
         lines.append(conditions_line)
-        for lbl, frm, to in flips:
-            lines.append(f"  • <b>SELL {frm}, BUY {to}</b>  ({lbl})")
+        for lbl, frm, to, mode in flips:
+            lines.append(f"  • <b>SELL {frm}, BUY {to}</b>  ({lbl}) — {EXEC_LABEL[mode]}")
         return lines
     if approaching:
         n = len(approaching)
@@ -1348,9 +1424,11 @@ def main(current_et=None):
     # Detect pending orders (per-strategy) — needed for flip-day display
     flipped = {}
     for key, ns in new_state.items():
-        pending = ns.get("pending_order")
+        if key.startswith("_"):
+            continue
+        pending = ns.get("pending_order") or ns.get("executed_order")
         if pending:
-            flipped[key] = pending["sell"]  # current actual position
+            flipped[key] = pending["sell"]  # position held at today's close
 
     fresh_warns = []
     if spy_missed >= 1:
@@ -1433,13 +1511,13 @@ def main(current_et=None):
     lines.extend(render_lev_section("SPY Leveraged (Roth)", SPY_LEV_ROTH_PARAMS, spy_lev_roth_st,
                                      spy_first_date,
                                      flipped_today=("spy_lev_roth" in flipped),
-                                     prev_position=flipped.get("spy_lev_roth")))
+                                     prev_position=flipped.get("spy_lev_roth"), key="spy_lev_roth"))
     lines.append("")
     if qqq_lev_st is not None:
         lines.extend(render_lev_section("QQQ Leveraged (Roth)", QQQ_LEV_PARAMS, qqq_lev_st,
                                          qqq_first_date,
                                          flipped_today=("qqq_lev_roth" in flipped),
-                                         prev_position=flipped.get("qqq_lev_roth")))
+                                         prev_position=flipped.get("qqq_lev_roth"), key="qqq_lev_roth"))
         lines.append("")
     else:
         lines.extend(render_guarded_state_section("QQQ Leveraged (Roth)", new_state.get("qqq_lev_roth", {}), "TQQQ")); lines.append("")
@@ -1459,13 +1537,13 @@ def main(current_et=None):
     lines.extend(render_lev_section("SPY Leveraged (Brok)", SPY_LEV_BROK_PARAMS, spy_lev_brok_st,
                                      spy_first_date,
                                      flipped_today=("spy_lev_brok" in flipped),
-                                     prev_position=flipped.get("spy_lev_brok")))
+                                     prev_position=flipped.get("spy_lev_brok"), key="spy_lev_brok"))
     lines.append("")
     if qqq_lev_st is not None:
         lines.extend(render_lev_section("QQQ Leveraged (Brok)", QQQ_LEV_PARAMS, qqq_lev_st,
                                          qqq_first_date,
                                          flipped_today=("qqq_lev_brok" in flipped),
-                                         prev_position=flipped.get("qqq_lev_brok")))
+                                         prev_position=flipped.get("qqq_lev_brok"), key="qqq_lev_brok"))
         lines.append("")
     else:
         lines.extend(render_guarded_state_section("QQQ Leveraged (Brok)", new_state.get("qqq_lev_brok", {}), "TQQQ")); lines.append("")
@@ -1523,5 +1601,91 @@ def main(current_et=None):
     print(f"State saved to {STATE_FILE}")
 
 
+EARLY_ALERT_FILE = "early_alert.json"
+
+
+def main_letf_early(current_et=None):
+    """Fast post-close check for the leveraged sleeves only (UPRO/TQQQ).
+
+    Runs ~4:20 PM ET so same-day trades can be placed after hours. Read-only with
+    respect to state.json (the 5:20 PM full monitor still owns state); it only sends
+    a Telegram when a leveraged signal flips today, and dedupes via early_alert.json.
+    """
+    import pytz
+    et_tz = pytz.timezone("America/New_York")
+    current_et = current_et or datetime.now(et_tz)
+    session = latest_completed_market_session(current_et)
+    session_s = session.isoformat()
+
+    early = {}
+    if os.path.exists(EARLY_ALERT_FILE):
+        try:
+            with open(EARLY_ALERT_FILE) as f:
+                early = json.load(f)
+        except Exception:
+            early = {}
+    if early.get("last_alerted_session") == session_s:
+        print(f"Early LETF alert already sent for {session_s}")
+        return
+
+    series = {}
+    for tkr in ("SPY", "QQQ"):
+        try:
+            df = frame_through_session(fetch_etf_yfinance(tkr), session)
+            df = ensure_session_close(df, tkr, session)
+            c = df["Close"].copy()
+            c.index = pd.to_datetime(c.index).normalize()
+            if pd.Timestamp(c.index[-1]).date() != session:
+                raise ValueError(f"{tkr} last bar {c.index[-1].date()} != {session}")
+            series[tkr] = c
+        except Exception as e:
+            print(f"Early LETF check deferred - {tkr} close for {session} not ready: {e}")
+            return
+
+    prev = load_state()
+    sleeves = [
+        ("spy_lev_roth", "SPY Leveraged (Roth)", SPY_LEV_ROTH_PARAMS),
+        ("spy_lev_brok", "SPY Leveraged (Brok)", SPY_LEV_BROK_PARAMS),
+        ("qqq_lev_roth", "QQQ Leveraged (Roth)", QQQ_LEV_PARAMS),
+        ("qqq_lev_brok", "QQQ Leveraged (Brok)", QQQ_LEV_PARAMS),
+    ]
+    flips, inputs = [], {}
+    for key, label, p in sleeves:
+        c = series[p["signal_asset"]]
+        ma = c.rolling(p["ma"]).mean()
+        vol = compute_vol20(c)
+        st = walk_lev_state(c, ma, vol, p["vol_thr"], p["exit_lag"], p["entry_lag"])
+        inputs[p["signal_asset"]] = (st["current_price"], p["ma"], st["current_ma"],
+                                     st["current_vol"], p["vol_thr"])
+        target = p["leveraged"] if st["state"] == "invested" else p["defensive"]
+        pe = prev.get(key, {})
+        held = state_actual_position(pe) or target
+        pending = pe.get("pending_order") or {}
+        if pending.get("buy") and str(pending.get("signal_date")) < session_s:
+            held = pending["buy"]  # yesterday's next-close order executed at today's close
+        if target != held:
+            flips.append((label, held, target, execution_mode(key, target)))
+
+    if not flips:
+        print(f"Early LETF check {session_s}: no flips")
+        return
+
+    lines = [f"<b>⚡ LEVERAGED SIGNAL FLIP — {session_s} close</b>"]
+    for tkr, (px, man, mav, v, thr) in inputs.items():
+        lines.append(f"{tkr} {px:.2f} | SMA{man} {mav:.2f} | vol20 {v*100:.1f}% (thr {int(thr*100)}%)")
+    lines.append("")
+    for label, frm, to, mode in flips:
+        lines.append(f"• <b>SELL {frm} → BUY {to}</b> ({label})")
+        lines.append(f"   ↳ {EXEC_LABEL[mode]}")
+    lines.append("")
+    lines.append("<i>Early check (leveraged sleeves only). Full monitor follows ~5:20 PM ET.</i>")
+    send_telegram(os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"], "\n".join(lines))
+    with open(EARLY_ALERT_FILE, "w") as f:
+        json.dump({"last_alerted_session": session_s}, f, indent=2)
+
+
 if __name__ == "__main__":
-    main()
+    if os.environ.get("LETF_EARLY", "").lower() == "true":
+        main_letf_early()
+    else:
+        main()
