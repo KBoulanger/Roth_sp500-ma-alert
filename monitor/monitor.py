@@ -105,27 +105,14 @@ if problems:
     print("DATA NOT READY:"); [print(" -", p) for p in problems]
     print("RESULT: STALE DATA - NO SIGNAL COMPUTED"); sys.exit(2)
 
-# ---- unemployment: bot's own fetch_unrate() (FRED UNRATE) first, BLS public API as fallback ----
-# (BLS's keyless API has a shared daily quota and returns no "series" once it is used up)
-d_un = None; un_txt = "UNAVAILABLE"; un_errs = []
+# ---- unemployment (BLS = same series as FRED UNRATE) ----
 try:
-    u = bot.fetch_unrate()
-    if len(u) < 4: raise ValueError("fewer than four UNRATE observations")
-    d_un = float(u.iloc[-1]["UNRATE"]) - float(u.iloc[-4]["UNRATE"])
-    un_txt = f"{d_un:+.2f}pp ({u.iloc[-4]['DATE']:%m}→{u.iloc[-1]['DATE']:%m/%Y}, FRED)"
+    js = requests.get("https://api.bls.gov/publicAPI/v2/timeseries/data/LNS14000000", timeout=30).json()
+    pts = sorted(((int(x["year"]), int(x["period"][1:]), float(x["value"])) for x in js["Results"]["series"][0]["data"]
+                  if x["period"].startswith("M") and x["period"] != "M13" and x["value"].replace(".", "", 1).isdigit()))
+    d_un = pts[-1][2] - pts[-4][2]; un_txt = f"{d_un:+.2f}pp ({pts[-4][1]:02d}→{pts[-1][1]:02d}/{pts[-1][0]})"
 except Exception as ex:
-    un_errs.append(f"FRED: {ex}")
-if d_un is None:
-    try:
-        js = requests.get("https://api.bls.gov/publicAPI/v2/timeseries/data/LNS14000000", timeout=30).json()
-        if js.get("status") != "REQUEST_SUCCEEDED": raise ValueError(" ".join(js.get("message") or [js.get("status", "no status")])[:120])
-        pts = sorted(((int(x["year"]), int(x["period"][1:]), float(x["value"])) for x in js["Results"]["series"][0]["data"]
-                      if x["period"].startswith("M") and x["period"] != "M13" and x["value"].replace(".", "", 1).isdigit()))
-        d_un = pts[-1][2] - pts[-4][2]; un_txt = f"{d_un:+.2f}pp ({pts[-4][1]:02d}→{pts[-1][1]:02d}/{pts[-1][0]}, BLS)"
-    except Exception as ex:
-        un_errs.append(f"BLS: {ex}")
-if d_un is None:
-    notes.append(f"Unemployment data unavailable ({'; '.join(un_errs)}); defensive routing assumed SP500 — verify")
+    d_un = None; un_txt = "UNAVAILABLE"; notes.append(f"Unemployment data unavailable ({ex}); defensive routing assumed SP500 — verify")
 ur_thr = bot.ROTH_TOP7_PARAMS["ur_thr"]
 top7_def = "TREASURIES" if (d_un is not None and d_un > ur_thr) else "SP500"
 
