@@ -53,6 +53,8 @@ Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
     ROTH (ALT-A): D-asym 300/50/100/5/0.40/10/tiered_0.1  + runup ratchet G60/S25 (Roth only,
                   added 2026-08-14; third exit path on the basket's own NAV, locked to Jan rebalance)
     BROK (BROK_A): D-asym 300/50/100/5/0.45/25/tiered_0.1
+                  + big-year WATCH (alert only, added 2026-11-11): shown once the basket hits
+                  +100% YTD; flags a -25% drawdown from the high for a manual review. No rule.
     SPY Leveraged R+B:  MA300 v<21% e=1 r=1 → UPRO ↔ USFR
     QQQ Leveraged R+B:  MA150 v<31% e=4 r=1 → TQQQ ↔ USFR
 
@@ -322,6 +324,14 @@ TOP7_RATCHET_PARAMS = {
     "stop_drop": 0.25,
     "basket_file": "top7_basket.json",
     "roth_only": True,
+}
+# Big-year WATCH — BROKERAGE ONLY (added 2026-11-11). Alert only, never a trade signal.
+# Shown only once the Top-7 basket has been >= +WATCH_GAIN YTD at some point this year.
+# Backtest (1964-2024 + 2026): an automatic +100%/-25% stop in the brokerage was roughly
+# break-even after tax and only paid off in 2026, so selling stays a manual, high-conviction call.
+BROK_BIG_YEAR_WATCH = {
+    "watch_gain": 1.00,     # basket peak YTD gain that turns the watch on
+    "review_drop": 0.25,    # drawdown from the high worth reviewing (cyclical baskets, e.g. memory)
 }
 SPY_LEV_ROTH_PARAMS = {
     "ma": 300, "vol_thr": 0.21, "vol_window": 20, "exit_lag": 1, "entry_lag": 1,
@@ -784,6 +794,35 @@ def walk_ratchet_state(nav, arm_gain, stop_drop):
     }
 
 
+def compute_big_year_watch(nav, watch_gain):
+    """Peak-YTD watch on the basket NAV (indexed to 1.0 at the January baseline).
+    Returns None unless the basket has been >= +watch_gain YTD at some point this year."""
+    peak = float(nav.max())
+    if peak - 1.0 < watch_gain:
+        return None
+    last = float(nav.iloc[-1])
+    return {"ytd": last - 1.0, "peak_ytd": peak - 1.0,
+            "peak_date": pd.Timestamp(nav.idxmax()).date(),
+            "off_high": last / peak - 1.0}
+
+
+def render_big_year_watch(w):
+    rd = BROK_BIG_YEAR_WATCH["review_drop"]
+    hit = w["off_high"] <= -rd
+    lines = [f"<u>Big-year watch</u> (alert only, no rule): {'⚠️' if hit else '👀'} basket "
+             f"{w['ytd']:+.0%} YTD | peak {w['peak_ytd']:+.0%} on {w['peak_date']} | "
+             f"{w['off_high']:+.0%} off high"]
+    if hit:
+        lines.append(f"  • <b>Down {int(rd*100)}%+ from the high.</b> If the basket is cyclical "
+                     f"(e.g. memory), review a manual sale — only with extreme confidence. "
+                     f"Gains held &lt;1yr are taxed short-term.")
+    else:
+        lines.append(f"  • Basket passed +{int(BROK_BIG_YEAR_WATCH['watch_gain']*100)}% this year. "
+                     f"If cyclical (e.g. memory), revisit at a -{int(rd*100)}% drawdown from the high. "
+                     f"No automatic sell.")
+    return lines
+
+
 def render_top7_section(label_prefix, params, st, fallback_first_date, unrate_failed=False,
                          flipped_today=False, prev_position=None, ratchet=None, ratchet_warn=None):
     lines = []
@@ -1229,6 +1268,7 @@ def main(current_et=None):
     # --- Runup ratchet (ROTH ONLY). Third exit path; overrides the D-asym state when fired. ---
     ratchet = None
     ratchet_warn = None
+    brok_watch = None
     try:
         _cfg, ratchet_warn = load_basket_config(
             TOP7_RATCHET_PARAMS["basket_file"], pd.Timestamp(expected_session))
@@ -1244,6 +1284,10 @@ def main(current_et=None):
                 _closes, "Top-7 basket", expected_session, 1,
                 columns=_tickers, start_session=_cfg["baseline_date"])
         _nav = compute_basket_nav(_cfg, _closes)
+        try:
+            brok_watch = compute_big_year_watch(_nav, BROK_BIG_YEAR_WATCH["watch_gain"])
+        except Exception as _e:
+            print(f"NOTE: big-year watch skipped ({_e})")
         _nav_latest = pd.Timestamp(_nav.index[-1]).date()
         missing_required = required_data_missing(
             expected_session, {"Top-7 basket": _nav_latest})
@@ -1453,6 +1497,8 @@ def main(current_et=None):
                                           unrate_failed=unrate_failed,
                                           flipped_today=("top7_brok" in flipped),
                                           prev_position=flipped.get("top7_brok")))
+        if brok_watch is not None:
+            lines.extend(render_big_year_watch(brok_watch))
     else:
         lines.extend(render_guarded_state_section("Top-7 (Brok) — BROK_A", new_state.get("top7_brok", {}), "TOP-7 STOCKS"))
     lines.append("")
