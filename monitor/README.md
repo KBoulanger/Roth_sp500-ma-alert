@@ -12,3 +12,8 @@ disallowed, Rev. Rul. 2008-5; taxable buy = loss deferred into the new basis), a
 signalled re-entry that would trigger it.
 
 The scheduled-task prompts pin each file's SHA-256; update the prompts after editing these files.
+
+Midday reminders: the recurring 12:28 PM task is disabled (Kyle only wants a midday push when a
+trade is due). When the post-close monitor reports a next-close (MOC) trade, it prints
+`MOC_REMINDER_AT` / `MOC_REMINDER_TEXT`, and the scheduled task books a one-shot reminder for the
+next session. `moc_reminder.py` is kept for manual use.

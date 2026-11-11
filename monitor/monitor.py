@@ -128,7 +128,7 @@ def tdate(x): return pd.Timestamp(x).date() if x is not None else None
 def pct(a, b): return f"{a / b - 1:+.1%}"
 
 # ---- Top-7 (D-asym) ----
-ratchet = None
+ratchet = None; brok_watch = None
 try:
     cfg, warn = bot.load_basket_config("top7_basket.json", today)
     if cfg:
@@ -145,7 +145,10 @@ try:
             cols[t] = hh.sort_index()
         cl = pd.DataFrame(cols)
         stale_names = [t for t in tick if cl[t].dropna().index.max().date() != today.date()]
-        ratchet = bot.walk_ratchet_state(bot.compute_basket_nav(cfg, cl), bot.TOP7_RATCHET_PARAMS["arm_gain"], bot.TOP7_RATCHET_PARAMS["stop_drop"])
+        nav = bot.compute_basket_nav(cfg, cl)
+        ratchet = bot.walk_ratchet_state(nav, bot.TOP7_RATCHET_PARAMS["arm_gain"], bot.TOP7_RATCHET_PARAMS["stop_drop"])
+        if hasattr(bot, "compute_big_year_watch"):  # brokerage big-year WATCH (alert only, added 2026-11-11)
+            brok_watch = bot.compute_big_year_watch(nav, bot.BROK_BIG_YEAR_WATCH["watch_gain"])
         if stale_names: notes.append(f"Basket closes not yet updated for {stale_names} (ratchet NAV as of last bar)")
     else:
         notes.append(f"Ratchet: {warn}")
@@ -182,6 +185,12 @@ for key, acct, p in (("top7_roth", "ROTH", bot.ROTH_TOP7_PARAMS), ("top7_brok", 
     else:
         head = f"🛡️ **{pos}** — defensive"
         bl = [f"Re-entry: SPY {s7:.2f} vs SMA{p['ma_re']} {r7:.2f} ({pct(s7, r7)}) {ok(s7 >= r7)} · {st['reentry_streak']}/{p['R_re']} days"]
+    if key == "top7_brok" and brok_watch is not None:
+        rd = bot.BROK_BIG_YEAR_WATCH["review_drop"]; hit = brok_watch["off_high"] <= -rd
+        bl.append(f"Big-year watch (alert only) {'⚠️' if hit else '👀'}: basket {brok_watch['ytd']:+.0%} YTD, peak {brok_watch['peak_ytd']:+.0%} "
+                  f"on {brok_watch['peak_date']:%b %-d}, {brok_watch['off_high']:+.0%} off high" +
+                  (f" — **down {rd:.0%}+ from the high: review a manual sale only with extreme confidence** (cyclical baskets)" if hit
+                   else f" · review at -{rd:.0%} from high; no automatic sell"))
     CARDS[acct].append(("Top-7", head, bl))
 
 # ---- Leveraged sleeves ----
@@ -253,4 +262,12 @@ for acct, title in (("ROTH", "🏦 Roth IRA"), ("BROK", "💼 Brokerage")):
 msg += ["", "---", "",
         f"*Closes: SPY {spy.iloc[-1]:.2f}, QQQ {qqq.iloc[-1]:.2f} ({spy_src.lower()}) · NASDAQ {ixic.iloc[-1]:,.0f} ({ixic_src.lower()}) · "
         f"unemployment 3-mo change {un_txt} → Top-7 defensive = {top7_def.replace('SP500', 'S&P 500').title()}*"]
+moc = [l for l in msg if "(MOC" in l]
+if moc:  # next-close trades: the scheduled task books a one-shot midday reminder for the next session
+    nxt = cal.next_session(today); cut = (cal.session_close(nxt).tz_convert(et) - pd.Timedelta(10, unit="m"))
+    rem = min(cut - pd.Timedelta(90, unit="m"), pd.Timestamp(nxt.date()).tz_localize(et) + pd.Timedelta(hours=12, minutes=28))
+    print(f"MOC_REMINDER_AT: {rem:%Y-%m-%dT%H:%M:00}[America/New_York]")
+    print("MOC_REMINDER_TEXT START")
+    print(f"## ⏰ MOC order due today ({nxt.date():%a %b %-d})\n\nSubmit **market-on-close** before **{cut:%-I:%M %p} ET** (from yesterday's signal):\n")
+    print("\n".join(moc)); print("MOC_REMINDER_TEXT END")
 print("MESSAGE START"); print("\n".join(msg)); print("MESSAGE END")
