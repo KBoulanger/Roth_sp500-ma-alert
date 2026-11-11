@@ -20,7 +20,7 @@
     "ratchet_armed": true,
     "ratchet_fired": true,
     "ratchet_hwm": 6.845619805226761,
-    "ratchet_nav": 2.771024266339078,
+    "ratchet_nav": 2.698922737717941,
     "ratchet_locked": true,
     "signal_position": "SP500",
     "actual_position": "SP500"
@@ -49,42 +49,30 @@
   "spy_lev_roth": {
     "label": "SPY Leveraged (Roth)",
     "state": "defensive",
-    "position": "UPRO",
-    "exit_streak": 0,
+    "position": "USFR",
+    "exit_streak": 1,
     "exit_threshold": 1,
     "reentry_streak": 0,
     "reentry_threshold": 1,
     "signal_position": "USFR",
-    "actual_position": "UPRO",
-    "pending_order": {
-      "sell": "UPRO",
-      "buy": "USFR",
-      "signal_date": "2026-11-09",
-      "execution": "next MOC"
-    }
+    "actual_position": "USFR"
   },
   "spy_lev_brok": {
     "label": "SPY Leveraged (Brok)",
     "state": "defensive",
-    "position": "UPRO",
-    "exit_streak": 0,
+    "position": "USFR",
+    "exit_streak": 1,
     "exit_threshold": 1,
     "reentry_streak": 0,
     "reentry_threshold": 1,
     "signal_position": "USFR",
-    "actual_position": "UPRO",
-    "pending_order": {
-      "sell": "UPRO",
-      "buy": "USFR",
-      "signal_date": "2026-11-09",
-      "execution": "next MOC"
-    }
+    "actual_position": "USFR"
   },
   "qqq_lev_roth": {
     "label": "QQQ Leveraged (Roth)",
     "state": "defensive",
     "position": "USFR",
-    "exit_streak": 3,
+    "exit_streak": 4,
     "exit_threshold": 4,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -95,7 +83,7 @@
     "label": "QQQ Leveraged (Brok)",
     "state": "defensive",
     "position": "USFR",
-    "exit_streak": 3,
+    "exit_streak": 4,
     "exit_threshold": 4,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -103,13 +91,13 @@
     "actual_position": "USFR"
   },
   "_meta": {
-    "last_reported_market_date": "2026-11-09",
-    "last_reported_at_et": "2026-11-09T23:10:23.596353-05:00",
+    "last_reported_market_date": "2026-11-10",
+    "last_reported_at_et": "2026-11-10T20:58:49.093399-05:00",
     "source_dates": {
-      "SPY": "2026-11-09",
-      "QQQ": "2026-11-09",
-      "NASDAQCOM": "2026-11-09",
-      "TOP7_BASKET": "2026-11-09"
+      "SPY": "2026-11-10",
+      "QQQ": "2026-11-10",
+      "NASDAQCOM": "2026-11-10",
+      "TOP7_BASKET": "2026-11-10"
     },
     "price_gate": "Yahoo regularMarketPrice metadata checked at the exchange close; Nasdaq Composite accepted only after its 5:15 PM correction window"
   }
