@@ -2,6 +2,16 @@
 
 Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
 
+  Wash-sale stand-in rule (2026-11-11):
+    + If a leveraged re-entry would buy TQQQ/UPRO inside a wash-sale window (a taxable
+      loss sale of that ticker in the last 30 days, by Kyle OR his spouse — joint filers;
+      Roth/IRA buys count too), do NOT sit in cash: re-enter with the 2x fund on the same
+      index (QLD for TQQQ, SSO for UPRO), same dollars. Once the window has passed (day 31),
+      sell the 2x stand-in and buy the 3x fund. 2x vs 3x = different leverage/returns, so
+      treated as not substantially identical. The bot has no trade data, so it prints this
+      reminder on every TQQQ/UPRO re-entry; the post-close Claude monitor applies it
+      automatically from Robinhood loss sales.
+
   Scheduler hardening (2026-09-04):
     + Full-monitor attempts moved to 5:20 PM ET, with 5:40 PM and 6:10 PM
       retries. Nasdaq index corrections can run through 5:15 PM; GitHub's IANA
@@ -75,6 +85,20 @@ import numpy as np
 import requests
 from datetime import datetime, date
 from functools import lru_cache
+
+
+
+# Wash-sale stand-in (see 2026-11-11 changelog): 3x ticker -> 2x stand-in on the same index.
+WASH_SALE_STANDIN = {"TQQQ": "QLD", "UPRO": "SSO"}
+
+
+def wash_standin_note(ticker):
+    sub = WASH_SALE_STANDIN.get(ticker)
+    if not sub:
+        return None
+    return (f"🧾 Wash-sale check: if {ticker} was sold at a loss in a taxable account (you or spouse) "
+            f"in the last 30 days, buy {sub} (2x) with the same dollars instead, then swap "
+            f"{sub} → {ticker} once the window passes (day 31).")
 
 
 def today_et():
@@ -888,6 +912,8 @@ def render_lev_section(label, params, st, fallback_first_date,
     if flipped_today and prev_position and prev_position != target:
         lines.append(f"➤ <b>HOLD NOW: {prev_position}</b>  (until next-session MOC)")
         lines.append(f"➤ <b>NEXT-SESSION MOC: SELL {prev_position} → BUY {target}</b>")
+        if target == lev and wash_standin_note(lev):
+            lines.append(wash_standin_note(lev))
     else:
         lines.append(f"➤ <b>HOLD: {target}</b>")
     exit_rule = f"{sig} &lt; SMA{ma_n} OR {sig} vol20 ≥ {vt}%"
@@ -1048,6 +1074,8 @@ def build_summary_block(prev_state, new_state, conditions_line):
         lines.append(conditions_line)
         for lbl, frm, to in flips:
             lines.append(f"  • <b>SELL {frm}, BUY {to}</b>  ({lbl})")
+            if wash_standin_note(to):
+                lines.append(f"    {wash_standin_note(to)}")
         return lines
     if approaching:
         n = len(approaching)
