@@ -44,8 +44,18 @@ def wash_any(name):
     return [w for w in (wash(x) for x in syms) if w]
 def wash_line(x):
     return (f"**{x[0]}** sold at a **${-x[2]:,.0f} loss** in {x[3]} on {x[1]:%b %-d} → don't buy {x[0]} in ANY account "
-            f"through **{x[1] + dt.timedelta(days=30):%b %-d}** (Roth/IRA buy = loss lost forever; taxable buy = loss deferred). Safe from {x[1] + dt.timedelta(days=31):%b %-d}.")
+            f"through **{x[1] + dt.timedelta(days=30):%b %-d}** (Roth/IRA buy = loss lost forever; taxable buy = loss deferred). Safe from {x[1] + dt.timedelta(days=31):%b %-d}."
+            + (f" If {x[0]} re-enters before then: buy **{STANDIN[x[0]]}** (2x) with the same dollars, then swap {STANDIN[x[0]]} → {x[0]} on {x[1] + dt.timedelta(days=31):%b %-d}." if x[0] in STANDIN else ""))
 
+# Wash-sale stand-in rule (Nov 11 2026): if a leveraged re-entry would buy a ticker inside its wash-sale
+# window, buy the 2x version of the same index with the same dollars instead (not substantially identical:
+# different leverage), then swap 2x -> 3x on the first day the window has passed.
+STANDIN = {"TQQQ": "QLD", "UPRO": "SSO"}
+def safe_day(x): return x[1] + dt.timedelta(days=31)
+def swap_due(sym):
+    """Loss sales of sym whose window ended between the previous session (excl.) and today (incl.)."""
+    return [x for x in LOSSES if x[0] == sym and prev_sess.date() < safe_day(x) <= today.date()]
+LEV_STATE = {}
 problems, notes = [], []
 APPROX = set()
 
@@ -238,6 +248,7 @@ def lev(key, acct, p, price, ma_s, v20):
         bl.append(f"Re-enters when both ✅ for {p['entry_lag']} day · now {st['days_on_streak']}/{p['entry_lag']}")
     tl = {"same_day": "same day", "next_close": "next-day close"}
     bl.append(f"Timing: exit {tl[t['exit']]}, re-entry {tl[t['entry']]}")
+    LEV_STATE[(L_, acct)] = st["state"]
     CARDS[acct].append((L_, head, bl))
 
 lev("spy_lev_roth", "ROTH", bot.SPY_LEV_ROTH_PARAMS, spy, spy_sma_lev, spy_v20)
@@ -251,8 +262,20 @@ if problems:
 msg = [f"## 📊 Portfolio Monitor — {today.date():%a %b %-d}", ""]
 for i, (name, acct, txt) in enumerate(trades):
     bought = re.search(r"buy \*\*([^*]+)\*\*", txt)
-    ws = wash_any(bought.group(1).strip()) if bought else []
-    if ws: trades[i] = (name, acct, txt + " ⚠️ **WASH SALE**: " + "; ".join(f"{w[0]} loss sold {w[1]:%b %-d}, safe from {w[1] + dt.timedelta(days=31):%b %-d}" for w in ws))
+    tgt = bought.group(1).strip() if bought else None
+    ws = wash_any(tgt) if bought else []
+    if ws and tgt in STANDIN:
+        w = max(ws, key=lambda x: x[1]); sub = STANDIN[tgt]
+        trades[i] = (name, acct, txt.replace(f"buy **{tgt}**", f"buy **{sub}** (2x stand-in, same dollars — NOT {tgt})")
+                     + f" 🧾 {tgt} wash-sale window open (loss sold {w[1]:%b %-d}); swap {sub} → **{tgt}** on {safe_day(w):%b %-d}.")
+    elif ws:
+        trades[i] = (name, acct, txt + " ⚠️ **WASH SALE**: " + "; ".join(f"{w[0]} loss sold {w[1]:%b %-d}, safe from {safe_day(w):%b %-d}" for w in ws))
+    elif name in STANDIN and tgt != name and wash(name):
+        trades[i] = (name, acct, txt.replace(f"Sell {name}", f"Sell {name} (or the **{STANDIN[name]}** stand-in, if that's what you hold)"))
+for (L_, acct), stt in LEV_STATE.items():
+    if L_ in STANDIN and stt == "invested" and swap_due(L_):
+        trades.append((L_, acct, f"Wash-sale window has passed — if you're holding the **{STANDIN[L_]}** stand-in: "
+                                  f"sell {STANDIN[L_]} → buy **{L_}** tonight, minutes after the close (after-hours limit order)"))
 if trades:
     msg += ["### 🔴 Trades needed", ""]
     merged = {}
