@@ -20,7 +20,7 @@
     "ratchet_armed": true,
     "ratchet_fired": true,
     "ratchet_hwm": 6.8455961425455785,
-    "ratchet_nav": 2.9336132484729456,
+    "ratchet_nav": 2.784240219978694,
     "ratchet_locked": true,
     "signal_position": "SP500",
     "actual_position": "SP500"
@@ -50,7 +50,7 @@
     "label": "SPY Leveraged (Roth)",
     "state": "defensive",
     "position": "USFR",
-    "exit_streak": 3,
+    "exit_streak": 4,
     "exit_threshold": 1,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -61,7 +61,7 @@
     "label": "SPY Leveraged (Brok)",
     "state": "defensive",
     "position": "USFR",
-    "exit_streak": 3,
+    "exit_streak": 4,
     "exit_threshold": 1,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -72,7 +72,7 @@
     "label": "QQQ Leveraged (Roth)",
     "state": "defensive",
     "position": "USFR",
-    "exit_streak": 6,
+    "exit_streak": 7,
     "exit_threshold": 4,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -83,7 +83,7 @@
     "label": "QQQ Leveraged (Brok)",
     "state": "defensive",
     "position": "USFR",
-    "exit_streak": 6,
+    "exit_streak": 7,
     "exit_threshold": 4,
     "reentry_streak": 0,
     "reentry_threshold": 1,
@@ -91,13 +91,13 @@
     "actual_position": "USFR"
   },
   "_meta": {
-    "last_reported_market_date": "2026-11-12",
-    "last_reported_at_et": "2026-11-12T21:40:44.701636-05:00",
+    "last_reported_market_date": "2026-11-13",
+    "last_reported_at_et": "2026-11-13T21:29:49.352479-05:00",
     "source_dates": {
-      "SPY": "2026-11-12",
-      "QQQ": "2026-11-12",
-      "NASDAQCOM": "2026-11-12",
-      "TOP7_BASKET": "2026-11-12"
+      "SPY": "2026-11-13",
+      "QQQ": "2026-11-13",
+      "NASDAQCOM": "2026-11-13",
+      "TOP7_BASKET": "2026-11-13"
     },
     "price_gate": "Yahoo regularMarketPrice metadata checked at the exchange close; Nasdaq Composite accepted only after its 5:15 PM correction window"
   }
