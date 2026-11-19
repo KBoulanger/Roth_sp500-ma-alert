@@ -763,7 +763,28 @@ def fetch_basket_closes(tickers):
         close = df["Close"]
     else:
         close = df[["Close"]].rename(columns={"Close": tickers[0]})
-    return close.dropna(how="all")
+    close = close.reindex(columns=list(tickers))
+    # yf.download silently returns an all-NaN/gappy column when one ticker's
+    # request fails (rate limit, transient error). Re-fetch those individually.
+    import time
+    for t in tickers:
+        if close[t].notna().sum() >= 0.95 * len(close):
+            continue
+        for attempt in range(3):
+            time.sleep(2 * (attempt + 1))
+            try:
+                h = yf.Ticker(t).history(period="1y", auto_adjust=True)
+            except Exception as e:
+                print(f"NOTE: basket re-fetch {t} attempt {attempt + 1} failed ({e})")
+                continue
+            if h is not None and not h.empty and "Close" in h:
+                s = h["Close"]
+                s.index = pd.DatetimeIndex(s.index).tz_localize(None).normalize()
+                close = close.reindex(close.index.union(s.index))
+                close[t] = close[t].combine_first(s)
+                print(f"NOTE: basket {t} re-fetched individually ({s.notna().sum()} rows)")
+                break
+    return close.sort_index().dropna(how="all")
 
 
 def compute_basket_nav(cfg, closes):
