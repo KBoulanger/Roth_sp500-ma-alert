@@ -1384,6 +1384,7 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
 
     # --- Runup ratchet (ROTH ONLY). Third exit path; overrides the D-asym state when fired. ---
     _cfg = None
+    _nav_latest = None
     ratchet = None
     ratchet_warn = None
     brok_watch = None
@@ -1785,8 +1786,8 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
     meta["source_dates"] = {
         "SPY": latest_d.isoformat(),
         "QQQ": qqq_last_d.isoformat(),
-        "NASDAQCOM": nasdaqcom_last_d.isoformat(),
-        "TOP7_BASKET": _nav_latest.isoformat(),
+        "NASDAQCOM": nasdaqcom_last_d.isoformat() if nasdaqcom_last_d else None,
+        "TOP7_BASKET": _nav_latest.isoformat() if _nav_latest else None,
     }
     meta["price_gate"] = (
         "Yahoo regularMarketPrice metadata checked at the exchange close; "

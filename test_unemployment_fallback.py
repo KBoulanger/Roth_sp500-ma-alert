@@ -64,3 +64,11 @@ class UnemploymentFallbackTests(unittest.TestCase):
   self.assertIn(note,rt.render_moc_orders([],{},'2026-11-30','15:50',note))
  def test_revised_history_does_not_invent_release_dates(self):
   self.assertTrue(rt.first_release_delta_history(self.revised(),pd.date_range('2026-11-01',periods=3)).isna().all())
+
+ def test_revised_monitor_retains_report_if_top7_inputs_incomplete(self):
+  b=rt.load_data_bundle(Path(__file__).parent/'tests/fixtures/guard.json.gz');b['unemployment']=self.revised();b['basket_config']=None;b['nasdaq']=b['nasdaq'].iloc[:0]
+  with patch.object(bot,'send_telegram') as send,patch.object(bot,'save_state') as save:
+   out=bot.main(pd.Timestamp(b['clock']).to_pydatetime(),dry_run=True,persist=False,monitor_mode=True,data_bundle=b,facts_override=b['facts'],state_override={})
+  self.assertIn(rt.UNEMPLOYMENT_REVISED_LINE,unescape(out['text']));self.assertTrue(out['joint'])
+  self.assertIsNone(out['state']['_meta']['source_dates']['TOP7_BASKET']);self.assertIsNone(out['state']['_meta']['source_dates']['NASDAQCOM'])
+  send.assert_not_called();save.assert_not_called()
