@@ -1776,10 +1776,37 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
         lines.append('Household wash-sale WATCH — every supplied taxable-loss ticker:')
         lines.extend(escape(wash_text(t,current_et.date(),facts['taxable_loss_sales']),quote=False) for t in open_symbols)
     text = "\n".join(lines)
-    if not dry_run: send_telegram(bot_token, chat_id, text)
+    # Short message (display only): trades first, then early warnings. The full
+    # report above is kept in the run log and in the returned 'text'.
+    from short_report import build_short_report
+    from joint_runtime import UNEMPLOYMENT_REVISED_LINE
+    def _top7_entry(key, has_ratchet):
+        e = new_state.get(key, {})
+        return {'label': e.get('label', key), 'invested': e.get('state') == 'invested',
+                'guarded': bool(e.get('data_guarded')), 'paths': e.get('paths', []),
+                'reentry_streak': e.get('reentry_streak'), 'reentry_threshold': e.get('reentry_threshold'),
+                'locked': bool(e.get('ratchet_locked')), 'has_ratchet': has_ratchet,
+                'pending': e.get('pending_order')}
+    short_text = build_short_report({
+        'date': expected_session, 'joint': joint_results, 'joint_error': joint_error,
+        'lev_metrics': {
+            'UPRO': {'index': 'SPY', 'price': latest_close, 'ma': sma300_v, 'ma_days': 300,
+                     'vol': spy_vol20_v, 'cap': SPY_LEV_ROTH_PARAMS['vol_thr']},
+            'TQQQ': {'index': 'QQQ', 'price': qqq_close_v, 'ma': qqq_sma150_v, 'ma_days': 150,
+                     'vol': qqq_vol20_v, 'cap': QQQ_LEV_PARAMS['vol_thr']}},
+        'top7': [_top7_entry('top7_roth', True), _top7_entry('top7_brok', False)],
+        'ratchet': ratchet, 'arm_gain': TOP7_RATCHET_PARAMS['arm_gain'],
+        'moc_orders': moc_orders, 'top7_warnings': top7_warnings,
+        'losses': facts.get('taxable_loss_sales', []),
+        'unemployment_revised': unemployment_line == UNEMPLOYMENT_REVISED_LINE,
+        'missing': [k for k in ('SPY', 'QQQ') if not health.get(k)]})
+    if force_partial:
+        short_text = "⚠️ FORCED INCOMPLETE-DATA DIAGNOSTIC — do not act on this.\n" + short_text
+    if not dry_run: print(text)
+    if not dry_run: send_telegram(bot_token, chat_id, short_text)
     if force_partial:
         print("Forced incomplete-data diagnostic; state intentionally not saved")
-        return {"text":text,"state":new_state,"joint":joint_results,"facts":facts,"signal_date":expected_session.isoformat(),"incomplete":True,"unemployment_data_line":unemployment_line}
+        return {"text":text,"state":new_state,"joint":joint_results,"facts":facts,"signal_date":expected_session.isoformat(),"incomplete":True,"unemployment_data_line":unemployment_line,"short_text":short_text}
     meta = dict(prev.get("_meta") or {})
     meta["last_reported_market_date"] = expected_session.isoformat()
     meta["last_reported_at_et"] = current_et.isoformat()
@@ -1795,7 +1822,7 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
     new_state["_meta"] = meta
     if persist and not dry_run: save_state(new_state)
     if persist and not dry_run: print(f"State saved to {STATE_FILE}")
-    return {'text':text,'state':new_state,'joint':joint_results,'facts':facts,'signal_date':expected_session.isoformat(),'incomplete':False,'moc_orders':moc_orders,'unemployment_data_line':unemployment_line}
+    return {'text':text,'state':new_state,'joint':joint_results,'facts':facts,'signal_date':expected_session.isoformat(),'incomplete':False,'moc_orders':moc_orders,'unemployment_data_line':unemployment_line,'short_text':short_text}
 
 
 if __name__ == "__main__":

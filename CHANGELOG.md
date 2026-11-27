@@ -1,5 +1,17 @@
 # Changes
 
+## 2026-11-27 — Short daily message with early warnings (display only)
+
+- Telegram now sends a short message: trades first (one line per account, with the
+  dividend-reinvestment reminder under any leveraged Roth buy), then `WATCH` lines when a
+  level is close, then nothing else. A quiet day is one line.
+- New `short_report.py` holds the wording and the "how close is close" levels (3% from a
+  moving average, 3 volatility points, 5% from the dip trigger, 5 points from the Roth
+  cushion, 5 days from a Top-7 day-count, 3 of 5 re-entry days, 3 days to a wash-sale
+  window end). It reads values the strategy code already computed.
+- No signal, rule, parameter or holding changed. The full report is still built, returned
+  as `text`, and printed to the run log; the short one is returned as `short_text`.
+
 ## 2026-11-27 — two-account leveraged rules (local review candidate)
 
 - Top-7's rising-unemployment defensive fund is IEF; non-rising remains S&P 500.
