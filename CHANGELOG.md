@@ -4,7 +4,7 @@
 
 - Top-7's rising-unemployment defensive fund is IEF; non-rising remains S&P 500.
 - Leveraged defensive routing is IEF/USFR using first-release UNRATE and a rounded
-  tenths comparison. Revised/unadjusted fallbacks fail closed.
+  tenths comparison. Unadjusted price fallbacks fail closed.
 - TQQQ Roth exits after one failing close; brokerage after four. Independent -20%
   dip entries re-arm only near a new all-time adjusted QQQ high.
 - Brokerage uses 3x only. Roth uses QLD/SSO until the 30%/10% adjusted-tax-cost
@@ -37,3 +37,12 @@ is part of this local review candidate.
   taxable account's own deferral note. January sales also check prior Roth buys.
 - Optional `state.json` `substitutes` contains only owner choices; default is empty.
   No automatic stock substitution, signal, weight or holdings-logic change occurs.
+
+### Claude review 1 — unemployment availability
+
+- Prefer a verified snapshot, then FRED initial releases, then the original
+  revised latest API / fredgraph CSV route. A key/snapshot is optional; only
+  failure of all sources blocks the report.
+- Print the exact first-release or revised-figures provenance line in every
+  routed report and midday reminder, including each Telegram message chunk.
+- No policy, signal parameters, Top-7 basket or golden accounting changes.

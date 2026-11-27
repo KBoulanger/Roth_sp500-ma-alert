@@ -92,7 +92,7 @@ from functools import lru_cache
 from pathlib import Path
 from joint_strategy import unemployment_rising, defensive_holding, SYMBOLS
 from joint_runtime import (load_facts, evaluate_sleeve, render_joint, first_release_delta_history,
-                           snapshot_unemployment, render_order, ROTH_BUY_REMINDER, wash_text, cached_observed_facts, merge_observed_facts, top7_buy_warnings, top7_rebalance_warnings, normalize_substitutes)
+                           snapshot_unemployment, unemployment_data_line, render_order, ROTH_BUY_REMINDER, wash_text, cached_observed_facts, merge_observed_facts, top7_buy_warnings, top7_rebalance_warnings, normalize_substitutes)
 
 EXECUTION_TIMING = {
     'spy_lev_roth': {'exit': 'next_close', 'entry': 'same_day'},
@@ -485,16 +485,54 @@ def fetch_unrate_fred_api(api_key) -> pd.DataFrame:
     return df
 
 
-def fetch_unrate_fallback():
-    raise RuntimeError("Revised UNRATE fallback disabled; supply first-release FRED data or a verified snapshot")
+def fetch_unrate_latest_api(api_key) -> pd.DataFrame:
+    params = {"series_id": "UNRATE", "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": 12}
+    resp = requests.get(FRED_API_BASE, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    records = []
+    for obs in data.get("observations", []):
+        d, v = obs.get("date"), obs.get("value")
+        if d and v and v != ".":
+            records.append({"DATE": pd.to_datetime(d), "UNRATE": float(v)})
+    return pd.DataFrame(records).sort_values("DATE").reset_index(drop=True)
 
 
-def fetch_unrate():
-    snapshot = os.environ.get("UNEMPLOYMENT_SNAPSHOT")
-    if snapshot: return snapshot_unemployment(snapshot, today_et())
-    key = os.environ.get("FRED_API_KEY")
-    if not key: raise RuntimeError("First-release UNRATE needs FRED_API_KEY or UNEMPLOYMENT_SNAPSHOT")
-    return fetch_unrate_fred_api(key)
+def fetch_unrate_fallback() -> pd.DataFrame:
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE"
+    df = pd.read_csv(url)
+    date_col = "DATE" if "DATE" in df.columns else "observation_date"
+    df = df.rename(columns={date_col: "DATE"})
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df["UNRATE"] = pd.to_numeric(df["UNRATE"], errors="coerce")
+    return df.dropna().sort_values("DATE").reset_index(drop=True).tail(12).reset_index(drop=True)
+
+
+def _valid_unemployment(df,first_release):
+    """Reject incomplete/invalid sources before advancing to the next fallback."""
+    if df is None or not {'DATE','UNRATE'}.issubset(df.columns):raise ValueError('Missing unemployment columns')
+    out=df.copy();out['DATE']=pd.to_datetime(out['DATE']);out['UNRATE']=pd.to_numeric(out['UNRATE'],errors='coerce')
+    out=out.dropna(subset=['DATE','UNRATE']).sort_values('DATE').drop_duplicates('DATE').reset_index(drop=True)
+    if len(out)<4 or not np.isfinite(out['UNRATE']).all():raise ValueError('Four finite unemployment observations required')
+    if not np.all(np.diff(pd.DatetimeIndex(out.DATE)[-4:].to_period('M').asi8)==1):raise ValueError('Four consecutive unemployment months required')
+    out.attrs['first_release']=bool(first_release)
+    return out
+
+
+def fetch_unrate() -> pd.DataFrame:
+    # Review 1: first-release is preferred, never the sole availability path.
+    snapshot=os.environ.get('UNEMPLOYMENT_SNAPSHOT')
+    if snapshot:
+        try:return _valid_unemployment(snapshot_unemployment(snapshot,today_et()),True)
+        except Exception:print('UNRATE verified snapshot unavailable; trying next source')
+    key=os.environ.get('FRED_API_KEY')
+    if key:
+        try:return _valid_unemployment(fetch_unrate_fred_api(key),True)
+        except Exception:print('UNRATE first-release API unavailable; trying original revised-data path')
+        try:return _valid_unemployment(fetch_unrate_latest_api(key),False)
+        except Exception:print('UNRATE latest API unavailable; trying original fredgraph CSV')
+    try:return _valid_unemployment(fetch_unrate_fallback(),False)
+    except Exception:raise RuntimeError('All unemployment sources unavailable: verified snapshot, first-release API, original revised API/CSV') from None
 
 
 # ============================
@@ -599,7 +637,13 @@ def walk_lev_state(price, ma, vol20, vol_thr, exit_lag, entry_lag):
 def telegram_chunks(text,limit=3900):
     # Keep the owner's Roth reminder in the SAME message immediately after its instruction.
     units=lambda value:len(value.encode('utf-16-le'))//2
-    lines=text.splitlines();blocks=[];i=0
+    lines=text.splitlines()
+    provenance=next((line for line in lines if line.startswith('Unemployment data: ')),None)
+    if provenance:
+        body='\n'.join(line for line in lines if line!=provenance)
+        if not body:return [provenance]
+        return [provenance+'\n'+chunk for chunk in telegram_chunks(body,limit-units(provenance)-1)]
+    blocks=[];i=0
     while i<len(lines):
         block=lines[i]
         if i+1<len(lines) and lines[i+1]==ROTH_BUY_REMINDER:
@@ -1563,7 +1607,9 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
         top7_warnings[new_state[key]['label']]=top7_buy_warnings(account,stock_tickers,stock_buy_date,facts,identity.get('account_last4'),role=='brokerage')
     summary_block = build_summary_block(prev, new_state, conditions_line,top7_warnings)
 
-    lines = [f"<b>📊 {ACCOUNT_LABEL}</b>", f"{latest_date.strftime('%Y-%m-%d')}"]
+    from html import escape
+    unemployment_line=unemployment_data_line(un)
+    lines = [f"<b>📊 {ACCOUNT_LABEL}</b>", f"{latest_date.strftime('%Y-%m-%d')}",escape(unemployment_line,quote=False)]
     lines.append('Observed leveraged facts: '+str(facts.get('source')))
     lines.append('MODEL signals and assumed fills are not broker confirmations. Top-7 holdings are MODEL only.')
     lines.append('Household watch coverage: '+str(facts.get('household_coverage','only explicitly supplied observations')))
@@ -1732,7 +1778,7 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
     if not dry_run: send_telegram(bot_token, chat_id, text)
     if force_partial:
         print("Forced incomplete-data diagnostic; state intentionally not saved")
-        return {"text":text,"state":new_state,"joint":joint_results,"facts":facts,"signal_date":expected_session.isoformat(),"incomplete":True}
+        return {"text":text,"state":new_state,"joint":joint_results,"facts":facts,"signal_date":expected_session.isoformat(),"incomplete":True,"unemployment_data_line":unemployment_line}
     meta = dict(prev.get("_meta") or {})
     meta["last_reported_market_date"] = expected_session.isoformat()
     meta["last_reported_at_et"] = current_et.isoformat()
@@ -1748,7 +1794,7 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
     new_state["_meta"] = meta
     if persist and not dry_run: save_state(new_state)
     if persist and not dry_run: print(f"State saved to {STATE_FILE}")
-    return {'text':text,'state':new_state,'joint':joint_results,'facts':facts,'signal_date':expected_session.isoformat(),'incomplete':False,'moc_orders':moc_orders}
+    return {'text':text,'state':new_state,'joint':joint_results,'facts':facts,'signal_date':expected_session.isoformat(),'incomplete':False,'moc_orders':moc_orders,'unemployment_data_line':unemployment_line}
 
 
 if __name__ == "__main__":

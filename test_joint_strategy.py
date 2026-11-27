@@ -158,11 +158,8 @@ class FactAndDataTests(unittest.TestCase):
             out=bot.fetch_etf_yfinance('QQQ')
         self.assertEqual(out.Close.tolist(),[90.,91.]);self.assertEqual(out.RawClose.tolist(),[100.,101.])
         self.assertEqual(download.call_args.kwargs['period'],'max');self.assertFalse(download.call_args.kwargs['auto_adjust'])
-    def test_no_unadjusted_or_revised_fallback(self):
+    def test_no_unadjusted_price_fallback(self):
         with self.assertRaises(RuntimeError):bot.fetch_etf_stooq('SPY')
-        with patch.dict(bot.os.environ,{},clear=True),patch.object(bot.requests,'get') as get:
-            with self.assertRaises(RuntimeError):bot.fetch_unrate()
-            get.assert_not_called()
     def test_fred_initial_release_request(self):
         response=Mock(status_code=200);response.json.return_value={'observations':[{'date':f'2026-0{i}-01','value':'4.0','realtime_start':f'2026-0{i+1}-05'} for i in range(5,9)]}
         with patch.object(bot.requests,'get',return_value=response) as get:

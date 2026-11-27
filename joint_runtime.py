@@ -221,6 +221,14 @@ def render_joint(result,account,facts,html=False):
     return [escape(x,quote=False) for x in lines] if html else lines
 
 
+UNEMPLOYMENT_REVISED_LINE = "Unemployment data: revised figures (first-release unavailable) — IEF/USFR and IEF/S&P routing may differ slightly from the tested rule."
+UNEMPLOYMENT_FIRST_RELEASE_LINE = "Unemployment data: first-release."
+
+
+def unemployment_data_line(observations):
+    return UNEMPLOYMENT_FIRST_RELEASE_LINE if observations.attrs.get('first_release') is True else UNEMPLOYMENT_REVISED_LINE
+
+
 def first_release_delta_history(observations,index):
     """Use initial values on/after publication, never backdate to the observation month."""
     if 'release_date' not in observations:return pd.Series(np.nan,index=index)
@@ -246,7 +254,9 @@ def load_data_bundle(path):
     if 'nasdaq' in raw:bundle['nasdaq']=pd.DataFrame({'NASDAQCOM':raw['nasdaq']['values']},index=pd.to_datetime(raw['nasdaq']['dates']))
     if 'basket' in raw:bundle['basket']=pd.DataFrame(raw['basket']['values'],index=pd.to_datetime(raw['basket']['dates']))
     if 'unemployment' in raw:
-        bundle['unemployment']=pd.DataFrame(raw['unemployment']);bundle['unemployment']['DATE']=pd.to_datetime(bundle['unemployment']['DATE']);bundle['unemployment']['release_date']=pd.to_datetime(bundle['unemployment']['release_date'])
+        bundle['unemployment']=pd.DataFrame(raw['unemployment']);bundle['unemployment']['DATE']=pd.to_datetime(bundle['unemployment']['DATE']);
+        if 'release_date' in bundle['unemployment']:bundle['unemployment']['release_date']=pd.to_datetime(bundle['unemployment']['release_date'])
+        bundle['unemployment'].attrs['first_release']=raw.get('unemployment_first_release','release_date' in bundle['unemployment'])
     return bundle
 
 
@@ -262,8 +272,9 @@ def moc_orders_from_payload(payload):
     return payload.get('moc_orders',[])
 
 
-def render_moc_orders(orders,facts,on,cutoff):
+def render_moc_orders(orders,facts,on,cutoff,unemployment_line=None):
     lines=[f'MODEL MOC reminder for {on}; submit before {cutoff} ET only after confirming holdings/fills.']
+    if unemployment_line:lines.append(unemployment_line)
     if not orders:lines.append('No model market-on-close instruction is due. Same-day leveraged entries/swaps are not MOC orders.')
     for o in orders:
         lines.extend(render_order(o['account'],o['sell'],o['buy'],'next-session MOC',facts.get('taxable_loss_sales',[]),on))

@@ -31,11 +31,17 @@ only an explicit discretionary model allocation can spend that cash. Unexpected
 real post-confirmation DRIPs are retained and flagged, never erased.
 
 Unemployment comes from FRED/ALFRED UNRATE initial releases (`output_type=4`) using
-release dates, not observation-month dates. The strict route needs `FRED_API_KEY`
+release dates, not observation-month dates. The preferred route accepts `FRED_API_KEY`
 or `UNEMPLOYMENT_SNAPSHOT`: a JSON object with `first_release: true`, `as_of`, and
 at least four consecutive monthly `observations` with `date`, `value` and
-`release_date`. `as_of` must cover the signal date. No revised CSV/BLS substitution
-is allowed. Do not put API keys in this repository or in messages.
+`release_date`. `as_of` must cover the signal date. Review 1 restores the original revised FRED latest API / fredgraph CSV path
+when the verified snapshot or first-release API is unavailable; no key is required
+for CSV. Snapshot and first-release failures, including insufficient observations,
+advance to the next source. Only failure of every source blocks the report.
+Every report, midday reminder and Telegram chunk states first-release provenance
+or the exact revised-figures warning. Revised observations have no asserted
+historic release dates: the current three-month delta drives current routing,
+while unknown historical release timing remains unknown (not invented PIT data). Do not put API keys in this repository or in messages.
 
 The UPRO next-close exit matches X's net-position convention: a passing close at
 the scheduled exit close restores IN. This does not prove whether an unseen
