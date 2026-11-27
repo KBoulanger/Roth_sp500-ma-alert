@@ -21,7 +21,9 @@ Pass read-only facts via `--spouse-export`, `--seed`, `--state-file`,
 The export defaults to the fixed dated seed if missing. Remote execution reads
 main/state.json as data for confirmed observations and optional `substitutes`.
 Explicit --state-file overrides this. FRED_API_KEY or a verified first-release
-snapshot is required. No revised-macro/raw-price fallback. Keep caches in task folder.
+snapshot is optional. Prefer the snapshot, then initial-release API, then the original
+revised FRED API/CSV fallback with the exact revised-data warning. Only all-source
+failure blocks. Every report/MOC reminder states its provenance. No raw-price fallback. Keep caches in task folder.
 
 There is no blanket 2x substitution or automatic day-31 swap. Brokerage stays 3x
 subject to its Roth-purchase lock; Roth upgrades need adjusted-cost cushion and

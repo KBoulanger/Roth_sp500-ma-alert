@@ -51,3 +51,14 @@ class MonitorTests(unittest.TestCase):
    with patch.object(mon,'verified_bundle',return_value=(root,bot)),patch.object(bot,'main',return_value=None) as run,contextlib.redirect_stdout(io.StringIO()):
     code=mon.main('post',['--repo',str(ROOT),'--cache-dir',str(ROOT/'.test_cache'),'--fixture',str(ROOT/'tests/fixtures/entry.json.gz'),'--state-file',str(state)])
    self.assertEqual(run.call_args.kwargs['facts_override']['substitutes'],{'TEST':'PEER'})
+ def test_revised_provenance_in_both_wrapper_messages(self):
+  import gzip,json
+  from joint_runtime import UNEMPLOYMENT_REVISED_LINE
+  raw=json.loads(gzip.open(ROOT/'tests/fixtures/guard.json.gz','rt').read());raw['unemployment_first_release']=False
+  raw['unemployment'].pop('release_date',None)
+  with tempfile.TemporaryDirectory(dir=ROOT) as folder:
+   fixture=Path(folder)/'revised.json';fixture.write_text(json.dumps(raw))
+   for script,extra in [('monitor.py',[]),('moc_reminder.py',['--now','2026-11-30T12:28:00-05:00'])]:
+    r=self.cli(script,extra=['--fixture',str(fixture)]+extra)
+    self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIn(UNEMPLOYMENT_REVISED_LINE,r.stdout)
+    self.assertNotIn('DATA NOT READY',r.stdout)
