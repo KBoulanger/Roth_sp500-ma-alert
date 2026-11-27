@@ -85,3 +85,14 @@ class ExportTests(unittest.TestCase):
         with self.assertRaises(ValueError):rt.snapshot_unemployment(self.file({'first_release':False,'as_of':'2026-11-27'}),'2026-11-27')
 
 if __name__=='__main__':unittest.main(verbosity=2)
+
+class ShortInputDryRunTests(unittest.TestCase):
+    def test_partial_diagnostic_short_history_cannot_deliver(self):
+        from joint_runtime import load_data_bundle
+        import os
+        bundle=load_data_bundle(Path(__file__).parent/'tests/fixtures/entry.json.gz')
+        bundle['prices']['SPY']=bundle['prices']['SPY'].iloc[-100:]
+        with patch.dict(os.environ,{'FORCE_PARTIAL_DATA':'true','MANUAL_RUN':'true'}),patch.object(bot,'send_telegram') as send,patch.object(bot,'save_state') as save:
+            with self.assertRaisesRegex(RuntimeError,'SPY DATA TOO SHORT'):
+                bot.main(pd.Timestamp(bundle['clock']).to_pydatetime(),dry_run=True,persist=False,data_bundle=bundle,state_override={})
+            send.assert_not_called();save.assert_not_called()

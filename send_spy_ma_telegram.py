@@ -1247,6 +1247,7 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
 
     # Sanity check: SPY history must be long enough for SMA300
     if len(spy_close) < 350:
+        if dry_run: raise RuntimeError(f"SPY DATA TOO SHORT: {len(spy_close)} rows; need 350+")
         send_telegram(bot_token, chat_id,
                       f"<b>⚠️ SPY DATA TOO SHORT</b>\nGot {len(spy_close)} days; need 350+ for SMA300. Bot aborted.")
         return
