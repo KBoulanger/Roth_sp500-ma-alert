@@ -100,5 +100,6 @@
       "TOP7_BASKET": "2026-11-20"
     },
     "price_gate": "Yahoo regularMarketPrice metadata checked at the exchange close; Nasdaq Composite accepted only after its 5:15 PM correction window"
-  }
+  },
+  "substitutes": {}
 }

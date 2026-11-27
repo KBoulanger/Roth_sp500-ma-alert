@@ -1,0 +1,24 @@
+[
+  {
+    "sleeve": "TQQQ",
+    "start": "1985-10-02",
+    "end": "2026-11-20",
+    "trades": 1084,
+    "clashes": 0,
+    "guard_sales": 0,
+    "waiting_days": 61,
+    "max_relative_numeric_difference": 2.0530579155406347e-16,
+    "input_sha256": "41099543d215eaeb0dba197e991d03f078047610cbd9f2120d72790e3ed0ccec"
+  },
+  {
+    "sleeve": "UPRO",
+    "start": "1964-01-02",
+    "end": "2026-11-20",
+    "trades": 1050,
+    "clashes": 2,
+    "guard_sales": 0,
+    "waiting_days": 2,
+    "max_relative_numeric_difference": 2.2009302351819018e-16,
+    "input_sha256": "e7382b6ab71e4b7112c1ed4db203f3b7c696535a8020123bec5f2e88d5c62417"
+  }
+]

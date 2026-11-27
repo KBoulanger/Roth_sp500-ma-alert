@@ -2,15 +2,16 @@
 
 Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
 
-  Wash-sale stand-in rule (2026-11-11):
-    + If a leveraged re-entry would buy TQQQ/UPRO inside a wash-sale window (a taxable
-      loss sale of that ticker in the last 30 days, by Kyle OR his spouse — joint filers;
-      Roth/IRA buys count too), do NOT sit in cash: re-enter with the 2x fund on the same
-      index (QLD for TQQQ, SSO for UPRO), same dollars. Once the window has passed (day 31),
-      sell the 2x stand-in and buy the 3x fund. 2x vs 3x = different leverage/returns, so
-      treated as not substantially identical. The bot has no trade data, so it prints this
-      reminder on every TQQQ/UPRO re-entry; the post-close Claude monitor applies it
-      automatically from Robinhood loss sales.
+  Two-account rules (2026-11-27):
+    + Top-7 defensive IEF when first-release unemployment rises >0.1pp; SP500 otherwise.
+    + TQQQ: Roth exit 1 / brokerage exit 4; independent once-per-decline -20% dip buys.
+      Brokerage TQQQ only; Roth QLD until the 30% brokerage tax-cost cushion clears.
+      Thirty-day brokerage entry lock and 5% floor after a Roth TQQQ purchase.
+    + UPRO: brokerage UPRO only; Roth SSO until the 10% tax-cost cushion clears.
+      Thirty-day brokerage entry lock, no floor and no dip. Exits next close.
+    + Real fixed/exported facts override replay assumptions. Model fills are not real fills.
+    + Both Roth IRAs have dividend reinvestment OFF from 2026-11-27; cash dividends stay
+      cash until a discretionary strategy purchase. Historic DRIPs still count as buys.
 
   Scheduler hardening (2026-09-04):
     + Full-monitor attempts moved to 5:20 PM ET, with 5:40 PM and 6:10 PM
@@ -65,8 +66,8 @@ Built on 2026-04-26 final (sha256 fdad9c62ebd9...) with the following changes:
     BROK (BROK_A): D-asym 300/50/100/5/0.45/25/tiered_0.1
                   + big-year WATCH (alert only, added 2026-11-11): shown once the basket hits
                   +100% YTD; flags a -25% drawdown from the high for a manual review. No rule.
-    SPY Leveraged R+B:  MA300 v<21% e=1 r=1 → UPRO ↔ USFR
-    QQQ Leveraged R+B:  MA150 v<31% e=4 r=1 → TQQQ ↔ USFR
+    SPY Leveraged R+B: MA300 v<21%, e=1 next close, r=1; paired UPRO/SSO policy
+    QQQ Leveraged: MA150 v<31%, brokerage e=4 / Roth e=1, r=1; paired TQQQ/QLD policy
 
     Config change 2026-08-12. Previously: SPY MA275 v<22% e=1 r=10 (Roth) /
     e=2 r=10 (Brok); QQQ MA175 v<30% e=2 r=2. Both accounts now share one config
@@ -88,18 +89,17 @@ from functools import lru_cache
 
 
 
-# Wash-sale stand-in (see 2026-11-11 changelog): 3x ticker -> 2x stand-in on the same index.
-WASH_SALE_STANDIN = {"TQQQ": "QLD", "UPRO": "SSO"}
+from pathlib import Path
+from joint_strategy import unemployment_rising, defensive_holding, SYMBOLS
+from joint_runtime import (load_facts, evaluate_sleeve, render_joint, first_release_delta_history,
+                           snapshot_unemployment, render_order, ROTH_BUY_REMINDER, wash_text, cached_observed_facts, merge_observed_facts, top7_buy_warnings, top7_rebalance_warnings, normalize_substitutes)
 
-
-def wash_standin_note(ticker):
-    sub = WASH_SALE_STANDIN.get(ticker)
-    if not sub:
-        return None
-    return (f"🧾 Wash-sale check: if {ticker} was sold at a loss in a taxable account (you or spouse) "
-            f"in the last 30 days, buy {sub} (2x) with the same dollars instead, then swap "
-            f"{sub} → {ticker} once the window passes (day 31).")
-
+EXECUTION_TIMING = {
+    'spy_lev_roth': {'exit': 'next_close', 'entry': 'same_day'},
+    'spy_lev_brok': {'exit': 'next_close', 'entry': 'same_day'},
+    'qqq_lev_roth': {'exit': 'same_day', 'entry': 'same_day'},
+    'qqq_lev_brok': {'exit': 'same_day', 'entry': 'same_day'},
+}
 
 def today_et():
     """Current calendar date in America/New_York.
@@ -284,16 +284,16 @@ def ensure_session_close(df, ticker, session_date, column="Close",
     existing = None
     if session_ts in out.index and column in out.columns:
         raw = out.loc[session_ts, column]
-        if isinstance(raw, pd.Series):
-            raw = raw.dropna().iloc[-1] if not raw.dropna().empty else np.nan
-        if pd.notna(raw):
-            existing = float(raw)
-    if existing is not None:
-        rel_gap = abs(existing / quote_close - 1.0)
-        if rel_gap > 0.0005:  # 5 bp: enough for rounding, not a different print.
-            raise ValueError(
-                f"{ticker} daily close {existing} disagrees with regular close "
-                f"{quote_close} by {rel_gap:.3%}")
+        if isinstance(raw, pd.Series): raw = raw.dropna().iloc[-1] if not raw.dropna().empty else np.nan
+        if pd.notna(raw): existing = float(raw)
+    if "RawClose" in out and column == "Close":
+        if existing is None: raise ValueError(f"{ticker}: an adjusted daily close is required; raw metadata cannot replace it")
+        raw_close = float(out.loc[session_ts, "RawClose"])
+        if abs(raw_close / quote_close - 1) > .0005:
+            raise ValueError(f"{ticker}: raw daily close disagrees with regular-close metadata")
+        return out.sort_index()  # preserve Adj Close, including on a dividend-adjusted historical row
+    if existing is not None and abs(existing / quote_close - 1) > .0005:
+        raise ValueError(f"{ticker}: daily close disagrees with regular-close metadata")
     out.loc[session_ts, column] = quote_close
     return out.sort_index()
 
@@ -372,43 +372,35 @@ QQQ_LEV_PARAMS = {
     "leveraged": "TQQQ", "defensive": "USFR", "signal_asset": "QQQ",
 }
 
+QQQ_LEV_BROK_PARAMS = dict(QQQ_LEV_PARAMS)
+QQQ_LEV_ROTH_PARAMS = dict(QQQ_LEV_PARAMS, exit_lag=1)
+
 # ============================
 # Data fetching
 # ============================
 
 def fetch_etf_yfinance(ticker: str) -> pd.DataFrame:
     import yfinance as yf
-    df = yf.download(ticker, period="3y", auto_adjust=True, progress=False)
+    # QQQ needs its full adjusted history for an ALL-TIME high, not a rolling 3y high.
+    df = yf.download(ticker, period="max" if ticker == "QQQ" else "3y",
+                     auto_adjust=False, actions=True, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    df.columns = [c.strip().title() for c in df.columns]
-    if "Close" not in df.columns:
-        raise ValueError(f"yfinance {ticker}: 'Close' not found. Got: {list(df.columns)}")
-    df = df[["Close"]].dropna()
-    if df.empty:
-        raise ValueError(f"yfinance {ticker} returned empty")
-    return df
+    if "Adj Close" not in df or "Close" not in df:
+        raise ValueError(f"{ticker}: dividend-adjusted and raw closes are both required")
+    out = pd.DataFrame({"Close": df["Adj Close"], "RawClose": df["Close"],
+                        "Dividends": df.get("Dividends", pd.Series(0., index=df.index))}).dropna(subset=["Close", "RawClose"])
+    if out.empty: raise ValueError(f"{ticker}: adjusted history is empty")
+    out.attrs["dividend_adjusted"] = True
+    return out
 
 
 def fetch_etf_stooq(ticker: str) -> pd.DataFrame:
-    url = STOOQ_SPY_URL if ticker.upper() == "SPY" else STOOQ_QQQ_URL
-    df = pd.read_csv(url)
-    if df.empty or "Close" not in df.columns:
-        raise ValueError(f"Stooq {ticker} returned unusable data")
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date").set_index("Date")
-    return df[["Close"]].dropna()
+    raise RuntimeError("Unverified adjustment fallback disabled; adjusted Yahoo history is required")
 
 
 def fetch_etf(ticker: str) -> pd.DataFrame:
-    try:
-        return fetch_etf_yfinance(ticker)
-    except Exception as e:
-        print(f"yfinance {ticker} failed: {e}, falling back to Stooq")
-    try:
-        return fetch_etf_stooq(ticker)
-    except Exception as e:
-        raise RuntimeError(f"All {ticker} sources failed. Last error: {e}")
+    return fetch_etf_yfinance(ticker)
 
 
 def fetch_nasdaqcom_yfinance() -> pd.DataFrame:
@@ -478,36 +470,31 @@ def fetch_nasdaqcom() -> pd.DataFrame:
 
 
 def fetch_unrate_fred_api(api_key) -> pd.DataFrame:
-    params = {"series_id": "UNRATE", "api_key": api_key, "file_type": "json", "sort_order": "desc", "limit": 12}
-    resp = requests.get(FRED_API_BASE, params=params, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    records = []
-    for obs in data.get("observations", []):
-        d, v = obs.get("date"), obs.get("value")
-        if d and v and v != ".":
-            records.append({"DATE": pd.to_datetime(d), "UNRATE": float(v)})
-    return pd.DataFrame(records).sort_values("DATE").reset_index(drop=True)
+    params = {"series_id": "UNRATE", "api_key": api_key, "file_type": "json",
+              "sort_order": "desc", "limit": 120, "output_type": 4,
+              "realtime_start": "1776-07-04", "realtime_end": today_et().isoformat()}
+    try: resp = requests.get(FRED_API_BASE, params=params, timeout=30)
+    except requests.RequestException: raise RuntimeError("First-release FRED network unavailable") from None
+    if resp.status_code != 200: raise RuntimeError(f"First-release FRED request failed (HTTP {resp.status_code})")
+    records = [{"DATE": pd.to_datetime(o["date"]), "UNRATE": float(o["value"]),
+                "release_date": pd.to_datetime(o["realtime_start"])}
+               for o in resp.json().get("observations", []) if o.get("value") not in (None, ".")]
+    if len(records) < 4: raise RuntimeError("Fewer than four initial UNRATE releases")
+    df = pd.DataFrame(records).sort_values("DATE").reset_index(drop=True)
+    df.attrs['first_release'] = True
+    return df
 
 
-def fetch_unrate_fallback() -> pd.DataFrame:
-    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE"
-    df = pd.read_csv(url)
-    date_col = "DATE" if "DATE" in df.columns else "observation_date"
-    df = df.rename(columns={date_col: "DATE"})
-    df["DATE"] = pd.to_datetime(df["DATE"])
-    df["UNRATE"] = pd.to_numeric(df["UNRATE"], errors="coerce")
-    return df.dropna().sort_values("DATE").reset_index(drop=True).tail(12).reset_index(drop=True)
+def fetch_unrate_fallback():
+    raise RuntimeError("Revised UNRATE fallback disabled; supply first-release FRED data or a verified snapshot")
 
 
-def fetch_unrate() -> pd.DataFrame:
-    api_key = os.environ.get("FRED_API_KEY")
-    if api_key:
-        try:
-            return fetch_unrate_fred_api(api_key)
-        except Exception as e:
-            print(f"FRED UNRATE API failed: {e}, falling back to CSV")
-    return fetch_unrate_fallback()
+def fetch_unrate():
+    snapshot = os.environ.get("UNEMPLOYMENT_SNAPSHOT")
+    if snapshot: return snapshot_unemployment(snapshot, today_et())
+    key = os.environ.get("FRED_API_KEY")
+    if not key: raise RuntimeError("First-release UNRATE needs FRED_API_KEY or UNEMPLOYMENT_SNAPSHOT")
+    return fetch_unrate_fred_api(key)
 
 
 # ============================
@@ -609,12 +596,32 @@ def walk_lev_state(price, ma, vol20, vol_thr, exit_lag, entry_lag):
 # Helpers
 # ============================
 
+def telegram_chunks(text,limit=3900):
+    # Keep the owner's Roth reminder in the SAME message immediately after its instruction.
+    units=lambda value:len(value.encode('utf-16-le'))//2
+    lines=text.splitlines();blocks=[];i=0
+    while i<len(lines):
+        block=lines[i]
+        if i+1<len(lines) and lines[i+1]==ROTH_BUY_REMINDER:
+            block+='\n'+lines[i+1];i+=1
+        blocks.append(block);i+=1
+    chunks=[];current=[];size=0
+    for block in blocks:
+        if units(block)>limit:raise ValueError('A Telegram instruction block exceeds the safe chunk size')
+        if current and size+units(block)+1>limit:
+            chunks.append('\n'.join(current));current=[];size=0
+        current.append(block);size+=units(block)+1
+    if current:chunks.append('\n'.join(current))
+    return chunks
+
+
 def send_telegram(bot_token, chat_id, text):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    resp = requests.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    responses=[]
+    for chunk in telegram_chunks(text):
+        payload={"chat_id":chat_id,"text":chunk,"parse_mode":"HTML","disable_web_page_preview":True}
+        resp=requests.post(url,json=payload,timeout=30);resp.raise_for_status();responses.append(resp.json())
+    return responses
 
 
 def days_in_strategy(walker_state, fallback_first_date):
@@ -677,7 +684,10 @@ def apply_actual_vs_signal_state(prev_state, new_state, signal_date):
     """
     signal_date_s = signal_date.isoformat() if hasattr(signal_date, "isoformat") else str(signal_date)
     for key, ns in new_state.items():
-        if key.startswith("_"):
+        if key.startswith("_") or key=="substitutes":
+            continue
+        if ns.get('joint_policy'):
+            # An assumed model purchase is never promoted to an actual broker fill.
             continue
         prev = prev_state.get(key, {})
         target = state_signal_position(ns)
@@ -869,21 +879,24 @@ def render_big_year_watch(w):
 
 
 def render_top7_section(label_prefix, params, st, fallback_first_date, unrate_failed=False,
-                         flipped_today=False, prev_position=None, ratchet=None, ratchet_warn=None):
+                         flipped_today=False, prev_position=None, ratchet=None, ratchet_warn=None, wash_warnings=None):
     lines = []
-    lines.append(f"<b>Top-7 ({label_prefix}) — {params['name']}</b>")
+    lines.append(f"<b>Top-7 ({label_prefix}) — {params['name']} — MODEL</b>")
     lines.append(f"<i>D-asym {params['ma_exit']}/{params['E_ma']}/{params['ma_re']}/{params['R_re']}/"
                  f"{params['vol_thr']:.2f}/{params['E_vol']}/tiered_{params['ur_thr']} | "
                  f"basket: TOP-7 stocks | defensive: tiered_{params['ur_thr']}</i>")
     if st["state"] == "invested":
         target = "TOP-7 STOCKS"
     else:
-        target = "TREASURIES" if st["_unrate_high"] else "SP500"
+        target = "IEF" if st["_unrate_high"] else "SP500"
         if unrate_failed:
             target = f"{target} ⚠️"
     if flipped_today and prev_position and prev_position != target:
         lines.append(f"➤ <b>HOLD NOW: {prev_position}</b>  (until next-session MOC)")
         lines.append(f"➤ <b>NEXT-SESSION MOC: SELL {prev_position} → BUY {target}</b>")
+        if target=='TOP-7 STOCKS' and wash_warnings:
+            from html import escape
+            lines.extend(escape(x,quote=False) for x in wash_warnings)
     else:
         lines.append(f"➤ <b>HOLD: {target}</b>")
     if st["state"] == "invested":
@@ -914,15 +927,19 @@ def render_top7_section(label_prefix, params, st, fallback_first_date, unrate_fa
         else:
             lines.append(f"<u>Runup ratchet</u>: not armed (basket {ratchet['ytd']:+.0%} YTD; arms at +{g}%)")
     if unrate_failed:
-        lines.append("<u>Defensive routing</u>: ⚠️ <b>UNRATE FETCH FAILED</b> — assuming stable (→ SP500). Verify manually.")
+        lines.append("<u>Defensive routing</u>: ⚠️ <b>UNRATE FETCH FAILED</b> — defensive routing not confirmed; no new instruction.")
     else:
-        lines.append(f"<u>Defensive routing</u>: ΔUNRATE_3mo &gt; {params['ur_thr']}pp → Treasuries, else → SP500")
+        lines.append(f"<u>Defensive routing</u>: ΔUNRATE_3mo &gt; {params['ur_thr']}pp → IEF, else → SP500")
     lines.append(_format_days_in_strategy(target, st, fallback_first_date, flipped_today, prev_position))
     return lines
 
 
 def render_lev_section(label, params, st, fallback_first_date,
                        flipped_today=False, prev_position=None):
+    if st.get('_joint_blocked'):
+        return [f'<b>{label}</b>', 'DATA NOT READY — no leveraged trade instruction: '+str(st['_joint_blocked'])]
+    if st.get('_joint_result'):
+        return render_joint(st['_joint_result'], st['_joint_account'], st['_joint_facts'], html=True)
     lines = []
     sig = params["signal_asset"]; lev = params["leveraged"]; defv = params["defensive"]
     ma_n = params["ma"]; vt = int(params["vol_thr"] * 100)
@@ -933,8 +950,6 @@ def render_lev_section(label, params, st, fallback_first_date,
     if flipped_today and prev_position and prev_position != target:
         lines.append(f"➤ <b>HOLD NOW: {prev_position}</b>  (until next-session MOC)")
         lines.append(f"➤ <b>NEXT-SESSION MOC: SELL {prev_position} → BUY {target}</b>")
-        if target == lev and wash_standin_note(lev):
-            lines.append(wash_standin_note(lev))
     else:
         lines.append(f"➤ <b>HOLD: {target}</b>")
     exit_rule = f"{sig} &lt; SMA{ma_n} OR {sig} vol20 ≥ {vt}%"
@@ -1049,7 +1064,7 @@ def build_conditions_line(spy_close, sma100, sma300, spy_vol20,
     return "Markets: " + " | ".join(bits)
 
 
-def build_summary_block(prev_state, new_state, conditions_line):
+def build_summary_block(prev_state, new_state, conditions_line, top7_warnings=None):
     flips = []; approaching = []; watching = []
 
     def categorize(label_text, streak, threshold, direction):
@@ -1064,7 +1079,7 @@ def build_summary_block(prev_state, new_state, conditions_line):
     n_risk_on = 0
     defensive = []
     for key, ns in new_state.items():
-        if key.startswith("_"): continue
+        if key.startswith("_") or key=="substitutes" or ns.get("joint_policy"): continue
         n_total += 1
         if ns.get("state") == "invested":
             n_risk_on += 1
@@ -1090,13 +1105,14 @@ def build_summary_block(prev_state, new_state, conditions_line):
     if flips:
         n = len(flips)
         lines.append(
-            f"<b>🔴 ACTION REQUIRED — {n} flip{'s' if n>1 else ''} at the "
+            f"<b>🔴 TOP-7 MODEL ACTION — {n} flip{'s' if n>1 else ''} at the "
             "NEXT MARKET-SESSION MOC (submit before your broker's cutoff)</b>")
         lines.append(conditions_line)
         for lbl, frm, to in flips:
             lines.append(f"  • <b>SELL {frm}, BUY {to}</b>  ({lbl})")
-            if wash_standin_note(to):
-                lines.append(f"    {wash_standin_note(to)}")
+            if to=='TOP-7 STOCKS':
+                from html import escape
+                lines.extend(escape(x,quote=False) for x in (top7_warnings or {}).get(lbl,[]))
         return lines
     if approaching:
         n = len(approaching)
@@ -1129,7 +1145,7 @@ def build_summary_block(prev_state, new_state, conditions_line):
         for lbl, pos in defensive:
             lines.append(f"  • {lbl} remains in {pos}")
         return lines
-    lines.append(f"<b>🟢 ALL CLEAR — {n_total} of {n_total} strategies risk-on, no signals progressing</b>")
+    lines.append(f"<b>🟢 TOP-7 — {n_total} of {n_total} strategies risk-on, no signals progressing</b>")
     lines.append(conditions_line)
     return lines
 
@@ -1138,7 +1154,7 @@ def build_summary_block(prev_state, new_state, conditions_line):
 # Main
 # ============================
 
-def main(current_et=None):
+def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, data_bundle=None, facts_override=None, state_override=None, publication_grace_minutes=15, historical_only=False):
     manual_run = os.environ.get("MANUAL_RUN", "").lower() == "true"
     final_attempt = os.environ.get("FINAL_ATTEMPT", "").lower() == "true"
     force_repeat = os.environ.get("FORCE_REPEAT", "").lower() == "true"
@@ -1146,12 +1162,15 @@ def main(current_et=None):
     import pytz
     et_tz = pytz.timezone("America/New_York")
     current_et = current_et or datetime.now(et_tz)
-    expected_session = latest_completed_market_session(current_et)
+    expected_session = latest_completed_market_session(current_et,grace_minutes=publication_grace_minutes)
+    if historical_only and data_bundle is None and expected_session>=today_et(): raise ValueError("Historical mode is only for an already-completed prior date")
 
-    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ["TELEGRAM_CHAT_ID"]
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not dry_run and (not bot_token or not chat_id): raise RuntimeError('Telegram credentials required for delivery; use --dry-run for local preview')
 
-    prev = load_state()
+    prev = load_state() if state_override is None else state_override
+    joint_results = {}; joint_error = None
     if not force_repeat and state_reported_market_date(prev) == expected_session:
         print(f"Skipping - market session {expected_session} was already reported")
         return
@@ -1161,9 +1180,9 @@ def main(current_et=None):
     try:
         # The audited strategy uses Yahoo adjusted closes. Automated runs fail
         # closed rather than silently switching to Stooq's different series.
-        spy_df = (fetch_etf("SPY") if force_partial else fetch_etf_yfinance("SPY"))
+        spy_df = data_bundle["prices"]["SPY"].copy() if data_bundle is not None else (fetch_etf("SPY") if force_partial else fetch_etf_yfinance("SPY"))
         spy_df = frame_through_session(spy_df, expected_session)
-        if not force_partial:
+        if not force_partial and data_bundle is None and not historical_only:
             spy_df = ensure_session_close(spy_df, "SPY", expected_session)
         if spy_df is None or spy_df.empty:
             raise ValueError(f"SPY has no row through required session {expected_session}")
@@ -1177,9 +1196,9 @@ def main(current_et=None):
             return
         raise
     try:
-        qqq_df = (fetch_etf("QQQ") if force_partial else fetch_etf_yfinance("QQQ"))
+        qqq_df = data_bundle["prices"]["QQQ"].copy() if data_bundle is not None else (fetch_etf("QQQ") if force_partial else fetch_etf_yfinance("QQQ"))
         qqq_df = frame_through_session(qqq_df, expected_session)
-        if not force_partial:
+        if not force_partial and data_bundle is None and not historical_only:
             qqq_df = ensure_session_close(qqq_df, "QQQ", expected_session)
         if qqq_df is None or qqq_df.empty:
             raise ValueError(f"QQQ has no row through required session {expected_session}")
@@ -1190,10 +1209,9 @@ def main(current_et=None):
     except Exception as e:
         print(f"WARN: QQQ fetch failed: {e}"); qqq_df = None
     try:
-        nasdaqcom_df = (fetch_nasdaqcom() if force_partial
-                        else fetch_nasdaqcom_yfinance())
+        nasdaqcom_df = data_bundle["nasdaq"].copy() if data_bundle is not None else (fetch_nasdaqcom() if force_partial else fetch_nasdaqcom_yfinance())
         nasdaqcom_df = frame_through_session(nasdaqcom_df, expected_session)
-        if not force_partial:
+        if not force_partial and data_bundle is None and not historical_only:
             nasdaqcom_df = ensure_session_close(
                 nasdaqcom_df, "^IXIC", expected_session, column="NASDAQCOM",
                 allow_late_index_timestamp=True)
@@ -1207,7 +1225,9 @@ def main(current_et=None):
     except Exception as e:
         print(f"WARN: NASDAQCOM fetch failed: {e}"); nasdaqcom_df = None
     try:
-        un = fetch_unrate(); health["UNRATE"] = True
+        un = data_bundle['unemployment'].copy() if data_bundle is not None else fetch_unrate()
+        if 'release_date' in un: un = un[un.release_date <= pd.Timestamp(expected_session)]
+        health['UNRATE'] = len(un) >= 4
     except Exception as e:
         print(f"WARN: UNRATE fetch failed: {e}"); un = None
 
@@ -1291,7 +1311,7 @@ def main(current_et=None):
         expected_session,
         {"SPY": latest_d, "QQQ": qqq_last_d, "NASDAQCOM": nasdaqcom_last_d},
     )
-    if missing_required and not force_partial:
+    if missing_required and not force_partial and not (monitor_mode and set(missing_required) <= {"NASDAQCOM"}):
         msg = (f"required session {expected_session} is not available for: "
                f"{', '.join(missing_required)}")
         if final_attempt or manual_run:
@@ -1299,12 +1319,15 @@ def main(current_et=None):
         print(f"Deferring scheduled report - {msg}")
         return
 
+    if un is not None and len(un)>=4:
+        months=pd.DatetimeIndex(un['DATE'] if 'DATE' in un else un.index)[-4:].to_period('M').asi8
+        if not np.all(np.diff(months)==1):raise RuntimeError('Four consecutive monthly first releases are required')
     # UNRATE delta
     if un is not None and len(un) >= 4:
         un_now_rate = float(un.iloc[-1]["UNRATE"])
         un_prior_rate = float(un.iloc[-4]["UNRATE"])
         un_chg = un_now_rate - un_prior_rate
-        un_flag_01 = un_chg > 0.1
+        un_flag_01 = unemployment_rising(un_chg)
     else:
         un_chg = 0.0; un_flag_01 = False
 
@@ -1315,20 +1338,20 @@ def main(current_et=None):
     roth_top7_st["_unrate_high"] = un_flag_01
 
     # --- Runup ratchet (ROTH ONLY). Third exit path; overrides the D-asym state when fired. ---
+    _cfg = None
     ratchet = None
     ratchet_warn = None
     brok_watch = None
     try:
-        _cfg, ratchet_warn = load_basket_config(
-            TOP7_RATCHET_PARAMS["basket_file"], pd.Timestamp(expected_session))
+        _cfg, ratchet_warn = (data_bundle.get("basket_config"), None) if data_bundle is not None else load_basket_config(TOP7_RATCHET_PARAMS["basket_file"], pd.Timestamp(expected_session))
         if _cfg is None:
             raise RuntimeError(ratchet_warn or "Top-7 basket config is unavailable")
         _tickers = [h["ticker"] for h in _cfg["holdings"]]
-        _closes = fetch_basket_closes(_tickers)
+        _closes = data_bundle["basket"].copy() if data_bundle is not None else fetch_basket_closes(_tickers)
         _closes = frame_through_session(_closes, expected_session)
         if not force_partial:
-            _closes = ensure_basket_session_closes(
-                _closes, _tickers, expected_session)
+            if data_bundle is None and not historical_only:
+                _closes = ensure_basket_session_closes(_closes, _tickers, expected_session)
             assert_recent_session_continuity(
                 _closes, "Top-7 basket", expected_session, 1,
                 columns=_tickers, start_session=_cfg["baseline_date"])
@@ -1346,9 +1369,11 @@ def main(current_et=None):
         ratchet = walk_ratchet_state(_nav, TOP7_RATCHET_PARAMS["arm_gain"],
                                      TOP7_RATCHET_PARAMS["stop_drop"])
     except Exception as e:
-        if not force_partial:
-            if final_attempt or manual_run:
-                raise
+        if monitor_mode:
+            nasdaqcom_signal_fresh = False
+            ratchet_warn = 'Top-7 data incomplete; retain prior state; no Top-7 instruction'
+        elif not force_partial:
+            if final_attempt or manual_run: raise
             print(f"Deferring scheduled report - ratchet input is not ready: {e}")
             return
         ratchet = None
@@ -1375,10 +1400,12 @@ def main(current_et=None):
     else:
         qqq_lev_st = None
 
+    qqq_lev_roth_st = dict(qqq_lev_st) if qqq_lev_st is not None else None
+
     # Build new_state (with paths for Top-7)
     def top7_position(st):
         if st["state"] == "invested": return "TOP-7 STOCKS"
-        return "TREASURIES" if un_flag_01 else "SP500"
+        return "IEF" if un_flag_01 else "SP500"
 
     new_state = {}
     new_state["top7_roth"] = {
@@ -1427,6 +1454,57 @@ def main(current_et=None):
             if k in prev_for_qqq:
                 new_state[k] = prev_for_qqq[k]
 
+    facts = facts_override if facts_override is not None else load_facts(
+        export_file=os.environ.get('SPOUSE_RH_EXPORT'),
+        extra_losses=json.loads(os.environ.get('HOUSEHOLD_LOSSES_JSON', '[]')))
+    if facts_override is None and 'substitutes' in prev:facts['substitutes']=dict(prev['substitutes'])
+    facts['substitutes']=normalize_substitutes(facts.get('substitutes',{}))
+    new_state['substitutes']=dict(facts['substitutes'])
+    if facts_override is None:
+        facts=merge_observed_facts(facts,(prev.get('_joint') or {}).get('observed_facts'))
+    try:
+        fund_prices = {}
+        for ticker in ('TQQQ','QLD','UPRO','SSO','IEF','USFR'):
+            f = data_bundle['prices'][ticker].copy() if data_bundle is not None else fetch_etf_yfinance(ticker)
+            f = frame_through_session(f, expected_session)
+            if f.empty or pd.Timestamp(f.index[-1]).date() != expected_session:
+                raise ValueError(f'{ticker} adjusted return history is stale')
+            if data_bundle is None and not force_partial and not historical_only: f = ensure_session_close(f,ticker,expected_session)
+            fund_prices[ticker] = f
+        next_session = xnyse_calendar().next_session(pd.Timestamp(expected_session)).date()
+        for sleeve,ix in [('UPRO',spy_close),('TQQQ',qqq_close_raw if qqq_signal_fresh else None)]:
+            if ix is None: continue
+            joint_results[sleeve] = evaluate_sleeve(sleeve,fund_prices,ix,un_chg,next_session,facts,
+                unemployment_history=first_release_delta_history(un,ix.index))
+        for sleeve,prefix,walkers in [('UPRO','spy_lev',{'R':spy_lev_roth_st,'B':spy_lev_brok_st}),
+                                      ('TQQQ','qqq_lev',{'R':qqq_lev_roth_st,'B':qqq_lev_st})]:
+            if sleeve not in joint_results: continue
+            result = joint_results[sleeve]
+            for account,suffix in [('R','roth'),('B','brok')]:
+                key = prefix+'_'+suffix; model = result['model_accounts'][account]
+                observed = result['observed'].get('roth' if account=='R' else 'brokerage',{})
+                target = model['holding']; actual = observed.get('holding')
+                ns = new_state[key]
+                ns.update(joint_policy=True,model_position=target,signal_position=target,
+                    actual_position=actual,position=actual or 'UNKNOWN',facts_as_of=result['observed'].get('as_of'),
+                    state='invested' if target in ('TQQQ','QLD','UPRO','SSO') else 'defensive',
+                    exit_threshold=1 if account=='R' or sleeve=='UPRO' else 4)
+                ns.pop('pending_order',None)
+                walkers[account].update(_joint_result=result,_joint_account=account,_joint_facts=facts)
+        new_state['_joint'] = {'rules_version':'2026-11-27','models':joint_results,'facts_source':facts.get('source'),'observed_facts':cached_observed_facts(facts)}
+        # Persist model quantities only; observed account sizes stay in the private export.
+        for result in new_state['_joint']['models'].values():
+            for item in result['observed'].values():
+                if isinstance(item,dict):item.pop('quantity',None)
+    except Exception as e:
+        joint_error = str(e)
+        if not force_partial:
+            if manual_run or final_attempt or dry_run: raise
+            print('Deferring scheduled report - joint model inputs unavailable: '+joint_error)
+            return
+        for st in [spy_lev_roth_st,spy_lev_brok_st,qqq_lev_roth_st,qqq_lev_st]:
+            if st is not None: st['_joint_blocked'] = joint_error
+
     if not nasdaqcom_signal_fresh:
         new_state = carry_forward_guarded_state(
             prev, new_state, ("top7_roth", "top7_brok"),
@@ -1436,6 +1514,10 @@ def main(current_et=None):
             prev, new_state, ("qqq_lev_roth", "qqq_lev_brok"),
             "QQQ data stale; QQQ leveraged state retained until native data refreshes")
 
+    if not nasdaqcom_signal_fresh:
+        for key in ('top7_roth','top7_brok'):
+            new_state[key] = dict(prev.get(key) or {'label':key,'state':'unknown','position':'UNKNOWN'}, data_guarded='Top-7 input not final; no new instruction')
+            new_state[key].pop('pending_order',None)
     new_state = apply_actual_vs_signal_state(prev, new_state, latest_d)
 
     # Detect pending orders (per-strategy) — needed for flip-day display
@@ -1470,9 +1552,24 @@ def main(current_et=None):
         qqq_close=qqq_close_v, qqq_sma150=qqq_sma150_v, qqq_vol20=qqq_vol20_v,
         nasdaqcom_vol30=vol30_v, un_chg=un_chg, un_flag_01=un_flag_01,
         unrate_failed=unrate_failed, nasdaqcom_stale_days=nasdaqcom_stale_days)
-    summary_block = build_summary_block(prev, new_state, conditions_line)
+    top7_warnings={}
+    stock_tickers=[h['ticker'] for h in (_cfg or {}).get('holdings',[])]
+    stock_buy_date=xnyse_calendar().next_session(pd.Timestamp(expected_session)).date()
+    for key,role in [('top7_roth','roth'),('top7_brok','brokerage')]:
+        identity=(facts.get('top7_accounts') or {}).get(role) or {}
+        if isinstance(identity,str):identity={'label':identity}
+        account=identity.get('label','Roth' if role=='roth' else 'Brokerage')
+        top7_warnings[new_state[key]['label']]=top7_buy_warnings(account,stock_tickers,stock_buy_date,facts,identity.get('account_last4'),role=='brokerage')
+    summary_block = build_summary_block(prev, new_state, conditions_line,top7_warnings)
 
     lines = [f"<b>📊 {ACCOUNT_LABEL}</b>", f"{latest_date.strftime('%Y-%m-%d')}"]
+    lines.append('Observed leveraged facts: '+str(facts.get('source')))
+    lines.append('MODEL signals and assumed fills are not broker confirmations. Top-7 holdings are MODEL only.')
+    lines.append('Household watch coverage: '+str(facts.get('household_coverage','only explicitly supplied observations')))
+    from html import escape
+    for note in facts.get('notes',[]):
+        if 'OBSERVED DRIP' in note or 'export not present' in note:lines.append(escape(note,quote=False))
+    if data_bundle is not None: lines.append('Data provenance: '+str(data_bundle.get('source','explicit offline bundle')))
     if force_partial:
         lines.append(
             "⚠️ <b>FORCED INCOMPLETE-DATA DIAGNOSTIC</b> — do not treat this "
@@ -1519,7 +1616,7 @@ def main(current_et=None):
                                           unrate_failed=unrate_failed,
                                           flipped_today=("top7_roth" in flipped),
                                           prev_position=flipped.get("top7_roth"),
-                                          ratchet=ratchet, ratchet_warn=ratchet_warn))
+                                          ratchet=ratchet, ratchet_warn=ratchet_warn,wash_warnings=top7_warnings.get(new_state['top7_roth']['label'])))
     else:
         lines.extend(render_guarded_state_section("Top-7 (Roth) — ALT-A", new_state.get("top7_roth", {}), "TOP-7 STOCKS"))
     lines.append("")
@@ -1529,7 +1626,7 @@ def main(current_et=None):
                                      prev_position=flipped.get("spy_lev_roth")))
     lines.append("")
     if qqq_lev_st is not None:
-        lines.extend(render_lev_section("QQQ Leveraged (Roth)", QQQ_LEV_PARAMS, qqq_lev_st,
+        lines.extend(render_lev_section("QQQ Leveraged (Roth)", QQQ_LEV_ROTH_PARAMS, qqq_lev_roth_st,
                                          qqq_first_date,
                                          flipped_today=("qqq_lev_roth" in flipped),
                                          prev_position=flipped.get("qqq_lev_roth")))
@@ -1545,7 +1642,7 @@ def main(current_et=None):
         lines.extend(render_top7_section("Brok", BROK_TOP7_PARAMS, brok_top7_st, spy_first_date,
                                           unrate_failed=unrate_failed,
                                           flipped_today=("top7_brok" in flipped),
-                                          prev_position=flipped.get("top7_brok")))
+                                          prev_position=flipped.get("top7_brok"),wash_warnings=top7_warnings.get(new_state["top7_brok"]["label"])))
         if brok_watch is not None:
             lines.extend(render_big_year_watch(brok_watch))
     else:
@@ -1557,7 +1654,7 @@ def main(current_et=None):
                                      prev_position=flipped.get("spy_lev_brok")))
     lines.append("")
     if qqq_lev_st is not None:
-        lines.extend(render_lev_section("QQQ Leveraged (Brok)", QQQ_LEV_PARAMS, qqq_lev_st,
+        lines.extend(render_lev_section("QQQ Leveraged (Brok)", QQQ_LEV_BROK_PARAMS, qqq_lev_st,
                                          qqq_first_date,
                                          flipped_today=("qqq_lev_brok" in flipped),
                                          prev_position=flipped.get("qqq_lev_brok")))
@@ -1597,10 +1694,44 @@ def main(current_et=None):
     if severe:
         lines.append("⚠️ <b>SEVERE STALENESS</b>: " + "; ".join(severe) + ". Verify before acting.")
 
-    send_telegram(bot_token, chat_id, "\n".join(lines))
+    moc_orders = []
+    for sleeve,result in joint_results.items():
+        if sleeve != 'UPRO': continue
+        for account,key in [('R','roth'),('B','brokerage')]:
+            actual=result['observed'].get(key,{}).get('holding')
+            if result['signal_meta'][key].get('pending_exit') and actual in ('UPRO','SSO'):
+                moc_orders.append({'account':"Katelyn Roth IRA" if account=='R' else 'Brokerage',
+                    'sell':actual,'buy':defensive_holding(un_chg),'sleeve':'UPRO','signal_date':expected_session.isoformat()})
+    if nasdaqcom_signal_fresh:
+        for key,walker in [('top7_roth',roth_top7_st),('top7_brok',brok_top7_st)]:
+            transition=walker.get('last_transition_date')
+            ratchet_flip=key=='top7_roth' and ratchet is not None and ratchet.get('fired') and pd.Timestamp(ratchet['fire_date']).date()==expected_session
+            if (transition is not None and pd.Timestamp(transition).date()==expected_session) or ratchet_flip:
+                target=new_state[key]['signal_position']
+                previous=state_actual_position(prev.get(key,{})) or ('TOP-7 STOCKS' if target!='TOP-7 STOCKS' else 'previous defensive holding (confirm)')
+                moc_orders.append({'account':'Roth' if key=='top7_roth' else 'Brokerage','sell':previous,
+                    'buy':target,'sleeve':'Top-7','signal_date':expected_session.isoformat()})
+    for order in moc_orders:
+        lines.append('MODEL next-close plan: '+order['account']+': sell '+order['sell']+' / buy '+order['buy']+' at the next session close (MOC).')
+        if order['sleeve']=='Top-7' and order['buy']=='TOP-7 STOCKS':
+            order['tickers']=stock_tickers
+            role='roth' if 'roth' in order['account'].lower() else 'brokerage'
+            identity=(facts.get('top7_accounts') or {}).get(role) or {}
+            if isinstance(identity,str):identity={'label':identity}
+            lines.extend(escape(x,quote=False) for x in top7_buy_warnings(identity.get('label',order['account']),stock_tickers,stock_buy_date,facts,identity.get('account_last4'),role=='brokerage'))
+    rebalance_notes=top7_rebalance_warnings(facts)
+    if rebalance_notes:
+        lines.append('Top-7 user-supplied January plan / before-window watch (text only; no signal or holding change):')
+        lines.extend(escape(x,quote=False) for x in rebalance_notes)
+    open_symbols=sorted({x['symbol'] for x in facts.get('taxable_loss_sales',[]) if 0<=(current_et.date()-pd.Timestamp(x['date']).date()).days<=30})
+    if open_symbols:
+        lines.append('Household wash-sale WATCH — every supplied taxable-loss ticker:')
+        lines.extend(escape(wash_text(t,current_et.date(),facts['taxable_loss_sales']),quote=False) for t in open_symbols)
+    text = "\n".join(lines)
+    if not dry_run: send_telegram(bot_token, chat_id, text)
     if force_partial:
-        print("Forced incomplete-data diagnostic sent; state intentionally not saved")
-        return
+        print("Forced incomplete-data diagnostic; state intentionally not saved")
+        return {"text":text,"state":new_state,"joint":joint_results,"facts":facts,"signal_date":expected_session.isoformat(),"incomplete":True}
     meta = dict(prev.get("_meta") or {})
     meta["last_reported_market_date"] = expected_session.isoformat()
     meta["last_reported_at_et"] = current_et.isoformat()
@@ -1614,9 +1745,36 @@ def main(current_et=None):
         "Yahoo regularMarketPrice metadata checked at the exchange close; "
         "Nasdaq Composite accepted only after its 5:15 PM correction window")
     new_state["_meta"] = meta
-    save_state(new_state)
-    print(f"State saved to {STATE_FILE}")
+    if persist and not dry_run: save_state(new_state)
+    if persist and not dry_run: print(f"State saved to {STATE_FILE}")
+    return {'text':text,'state':new_state,'joint':joint_results,'facts':facts,'signal_date':expected_session.isoformat(),'incomplete':False,'moc_orders':moc_orders}
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    from joint_runtime import load_data_bundle, blocked_preview
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--dry-run',action='store_true',help='Print only; no Telegram delivery or state write')
+    parser.add_argument('--facts',help='Read-only spouse export JSON')
+    parser.add_argument('--seed',help='Explicit observed strategy-state JSON')
+    parser.add_argument('--fixture',help='Explicit offline data bundle; requires --dry-run')
+    parser.add_argument('--unemployment-json',help='Verified first-release observations')
+    parser.add_argument('--loss',action='append',default=[],help='SYM@timestamp@gain@account; taxable losses only')
+    args=parser.parse_args()
+    if args.fixture and not args.dry_run:parser.error('--fixture requires --dry-run')
+    if args.facts:os.environ['SPOUSE_RH_EXPORT']=args.facts
+    if args.unemployment_json:os.environ['UNEMPLOYMENT_SNAPSHOT']=args.unemployment_json
+    if args.loss:os.environ['HOUSEHOLD_LOSSES_JSON']=json.dumps(args.loss)
+    bundle=load_data_bundle(args.fixture) if args.fixture else None
+    facts=bundle.get('facts') if bundle else None
+    if facts is None:facts=load_facts(seed_file=args.seed or Path(__file__).with_name('joint_state_seed.json'),export_file=args.facts,extra_losses=args.loss)
+    if bundle and not bundle.get('data_ready',True):
+        print(blocked_preview(facts,bundle.get('blocked_reason','input verification incomplete'),bundle.get('clock','unspecified')))
+    else:
+        try:
+            output=main(current_et=pd.Timestamp(bundle['clock']).to_pydatetime() if bundle else None,dry_run=args.dry_run,persist=not args.dry_run,data_bundle=bundle,facts_override=facts if bundle is not None or args.seed else None)
+            if args.dry_run:
+                print(output['text'] if output else blocked_preview(facts,'required completed-session data unavailable',datetime.now().isoformat()))
+        except Exception as exc:
+            if not args.dry_run:raise
+            print(blocked_preview(facts,str(exc),bundle.get('clock') if bundle else datetime.now().isoformat()))

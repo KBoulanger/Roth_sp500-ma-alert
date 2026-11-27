@@ -1,0 +1,131 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-11-27",
+  "source": "REAL: Robinhood history verified in the 2026-11-27 spouse handoff; fixed snapshot, not live account access",
+  "household_coverage": "partial: Kyle's daily taxable losses must also be supplied; no live brokerage connection in this bot",
+  "sleeves": {
+    "TQQQ": {
+      "as_of": "2026-11-27",
+      "roth": {
+        "account_last4": "6134",
+        "holding": "USFR",
+        "last_3x_buy": "2026-09-29",
+        "source": "real fixed history; includes dividend reinvestment"
+      },
+      "brokerage": {
+        "account_last4": "1514",
+        "holding": "USFR",
+        "last_3x_loss": "2026-11-09",
+        "tax_cost_per_share": null,
+        "quantity": null,
+        "source": "real fixed history; no current TQQQ lot"
+      },
+      "dip_armed": null,
+      "dip_armed_source": "modelled from full adjusted QQQ history; edit explicitly if an actual dip entry occurred"
+    },
+    "UPRO": {
+      "as_of": "2026-11-27",
+      "roth": {
+        "account_last4": "6134",
+        "holding": "USFR",
+        "last_3x_buy": "2026-09-29",
+        "source": "real fixed history; includes dividend reinvestment"
+      },
+      "brokerage": {
+        "account_last4": "1514",
+        "holding": "USFR",
+        "last_3x_loss": null,
+        "tax_cost_per_share": null,
+        "quantity": null,
+        "source": "real holding; most recent taxable UPRO loss was not provided"
+      }
+    }
+  },
+  "taxable_loss_sales": [
+    {
+      "symbol": "TQQQ",
+      "date": "2026-11-05",
+      "account_last4": "1514",
+      "taxable": true,
+      "gain": null,
+      "source": "real Robinhood realized P&L, verified handoff",
+      "gain_source": "negative classification verified; amount intentionally not stored",
+      "classification": "loss"
+    },
+    {
+      "symbol": "TQQQ",
+      "date": "2026-11-09",
+      "account_last4": "1514",
+      "taxable": true,
+      "gain": null,
+      "source": "real Robinhood realized P&L, verified handoff",
+      "gain_source": "negative classification verified; amount intentionally not stored",
+      "classification": "loss"
+    }
+  ],
+  "retirement_purchases": [
+    {
+      "symbol": "TQQQ",
+      "date": "2026-07-15",
+      "account_last4": "6134",
+      "placed_agent": "user"
+    },
+    {
+      "symbol": "UPRO",
+      "date": "2026-07-15",
+      "account_last4": "6134",
+      "placed_agent": "user"
+    },
+    {
+      "symbol": "TQQQ",
+      "date": "2026-09-29",
+      "account_last4": "6134",
+      "placed_agent": "drip"
+    },
+    {
+      "symbol": "UPRO",
+      "date": "2026-09-29",
+      "account_last4": "6134",
+      "placed_agent": "drip"
+    }
+  ],
+  "retirement_sales": [
+    {
+      "symbol": "TQQQ",
+      "date": "2026-11-05",
+      "account_last4": "6134"
+    },
+    {
+      "symbol": "TQQQ",
+      "date": "2026-11-09",
+      "account_last4": "6134"
+    },
+    {
+      "symbol": "UPRO",
+      "date": "2026-11-10",
+      "account_last4": "6134"
+    }
+  ],
+  "notes": [
+    "Unknown tax cost is null, never zero. Actual tax-lot cost including postponed losses overrides the model when supplied.",
+    "A pre-seed taxable loss with unknown replacement basis prevents a confirmed Roth 3x purchase until actual basis is supplied or a fresh unencumbered lot is known.",
+    "The replay assumes model fills only; it never confirms a real execution or submits an order.",
+    "A dividend reinvestment is a purchase, including the September 29 events; no DRIP setting is changed by this code."
+  ],
+  "dividend_reinvestment": {
+    "roth_off_as_of": "2026-11-27",
+    "accounts": [
+      "Kyle Roth IRA",
+      "Katelyn Roth IRA"
+    ],
+    "source": "REAL: owner instruction in ADDENDUM_FROM_CLAUDE_1.md",
+    "forward_dividends": "cash, never simulated DRIP purchases",
+    "historical_purchases": "September 29 DRIPs remain actual purchases"
+  },
+  "substitutes": {},
+  "top7_accounts": {
+    "roth": null,
+    "brokerage": null
+  },
+  "top7_rebalance_plan": []
+}
