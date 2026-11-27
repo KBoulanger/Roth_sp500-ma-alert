@@ -131,6 +131,35 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(float(out.loc[pd.Timestamp("2026-09-04"), "Close"]), 123.45)
 
 
+class BasketFetchTests(unittest.TestCase):
+    def _bulk(self, idx, good, failed):
+        cols = pd.MultiIndex.from_product([["Close"], good + failed])
+        data = np.column_stack([np.arange(len(idx), dtype=float) + 1 for _ in good]
+                               + [np.full(len(idx), np.nan) for _ in failed])
+        return pd.DataFrame(data, index=idx, columns=cols)
+
+    def test_refetches_ticker_silently_dropped_by_bulk_download(self):
+        idx = pd.bdate_range("2026-01-02", "2026-01-30")
+        single = pd.DataFrame({"Close": np.arange(len(idx), dtype=float) + 100},
+                              index=idx.tz_localize("America/New_York"))
+        with patch("yfinance.download", return_value=self._bulk(idx, ["AAA"], ["BBB"])), \
+             patch("yfinance.Ticker") as ticker, patch("time.sleep"):
+            ticker.return_value.history.return_value = single
+            out = bot.fetch_basket_closes(["AAA", "BBB"])
+        ticker.assert_called_once_with("BBB")
+        self.assertTrue(out[["AAA", "BBB"]].notna().all().all())
+        self.assertEqual(len(out), len(idx))
+
+    def test_persistent_failure_still_leaves_gap_for_fail_closed_check(self):
+        idx = pd.bdate_range("2026-01-02", "2026-01-30")
+        with patch("yfinance.download", return_value=self._bulk(idx, ["AAA"], ["BBB"])), \
+             patch("yfinance.Ticker") as ticker, patch("time.sleep"):
+            ticker.return_value.history.side_effect = RuntimeError("rate limited")
+            out = bot.fetch_basket_closes(["AAA", "BBB"])
+        self.assertEqual(ticker.return_value.history.call_count, 3)
+        self.assertTrue(out["BBB"].isna().all())
+
+
 class MainSchedulingIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

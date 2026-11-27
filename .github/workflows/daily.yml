@@ -50,7 +50,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Scheduler safety tests
-        run: python -m unittest -v test_scheduler.py
+        run: python -m unittest discover -v
 
       - id: bot
         run: python send_spy_ma_telegram.py
