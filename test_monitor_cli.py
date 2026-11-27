@@ -9,12 +9,13 @@ class MonitorTests(unittest.TestCase):
   return subprocess.run([sys.executable,str(ROOT/'monitor'/script),'--repo',str(ROOT),'--cache-dir',str(ROOT/'.test_cache'),'--fixture',str(ROOT/'tests/fixtures'/f'{case}.json.gz')]+list(extra),capture_output=True,text=True,env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1'),cwd=ROOT)
  def test_entry_accounts_reminder(self):
   r=self.cli('monitor.py');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
-  for text in ['Roth: buy QLD','Brokerage: buy TQQQ','SYNTHETIC','Reminder: keep dividend reinvestment OFF in both Roth IRAs']:self.assertIn(text,r.stdout)
+  for text in ['Roth (TQQQ plan): sell USFR, buy QLD','Brokerage (TQQQ plan): sell USFR, buy TQQQ','SYNTHETIC','TRADE TODAY','Reminder: keep dividend reinvestment OFF in both Roth IRAs']:self.assertIn(text,r.stdout)
+  self.assertNotIn('MODEL target',r.stdout)
  def test_cushion_and_guard(self):
   r=self.cli('monitor.py','cushion');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
-  for text in ['Roth: buy TQQQ / sell QLD','Roth: buy UPRO / sell SSO']:self.assertIn(text,r.stdout)
+  for text in ['Roth (TQQQ plan): sell QLD, buy TQQQ','Roth (UPRO plan): sell SSO, buy UPRO']:self.assertIn(text,r.stdout)
   r=self.cli('monitor.py','guard');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
-  for text in ['Brokerage: buy IEF / sell TQQQ','Brokerage: hold UPRO']:self.assertIn(text,r.stdout)
+  self.assertIn('Brokerage (TQQQ plan): sell TQQQ, buy IEF',r.stdout);self.assertNotIn('UPRO plan',r.stdout)
  def test_midday_preserves_same_day_timing(self):
   r=self.cli('moc_reminder.py',extra=['--now','2026-11-30T12:28:00-05:00']);self.assertEqual(r.returncode,0,r.stdout+r.stderr)
   self.assertIn('No model market-on-close instruction is due',r.stdout);self.assertNotIn('Roth: buy QLD',r.stdout)
@@ -60,5 +61,5 @@ class MonitorTests(unittest.TestCase):
    fixture=Path(folder)/'revised.json';fixture.write_text(json.dumps(raw))
    for script,extra in [('monitor.py',[]),('moc_reminder.py',['--now','2026-11-30T12:28:00-05:00'])]:
     r=self.cli(script,extra=['--fixture',str(fixture)]+extra)
-    self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIn(UNEMPLOYMENT_REVISED_LINE,r.stdout)
+    self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIn(UNEMPLOYMENT_REVISED_LINE if script=='moc_reminder.py' else 'used revised unemployment figures',r.stdout)
     self.assertNotIn('DATA NOT READY',r.stdout)

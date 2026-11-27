@@ -6,8 +6,8 @@ import argparse,hashlib,importlib.util,json,os,re,sys,urllib.request
 import pandas as pd
 import exchange_calendars as xc
 
-REVISION = 'fea47b86374516850c31b215ca0506155e410b28'
-PINS = {'send_spy_ma_telegram.py': 'e60bc8cf0eaca6bc217b7b9dba69e3d3f884b02706d99b2e17b619ef7a5a21d6', 'joint_strategy.py': '883aa31a949d3877715688f1579b46aebd5253a197853182c8af14fae490fb3b', 'joint_runtime.py': '2be233dbe4599bbf30474183ba2030a24ce0fb131af8629f0cc47ab184c94388', 'joint_state_seed.json': '6b8d7c187434420fc89f8b7240c0c311cc56268f0a6fb196c93584fd9e2f784b', 'top7_basket.json': '224288f49de13471fc13436f9d47fa1dc1388fefa9bd9156617f584b5927483d'}
+REVISION = 'bf10ac880a5603cee90e5a493107abe2d5d61f43'
+PINS = {'send_spy_ma_telegram.py': 'fd0c48d58e1eef6d90159a79882a5804c0f3118c9a7027fc0823bebc5a02af13', 'short_report.py': '0d41dcaa05ce7af8fd79547e7ef34629669dec8f7ff57e68fe1cf48c790af131', 'joint_strategy.py': '883aa31a949d3877715688f1579b46aebd5253a197853182c8af14fae490fb3b', 'joint_runtime.py': '2be233dbe4599bbf30474183ba2030a24ce0fb131af8629f0cc47ab184c94388', 'joint_state_seed.json': '6b8d7c187434420fc89f8b7240c0c311cc56268f0a6fb196c93584fd9e2f784b', 'top7_basket.json': '224288f49de13471fc13436f9d47fa1dc1388fefa9bd9156617f584b5927483d'}
 RAW = 'https://raw.githubusercontent.com/KBoulanger/Roth_sp500-ma-alert/'
 
 def verified_bundle(repo=None,cache=None):
@@ -105,14 +105,14 @@ def main(mode='post',argv=None):
         if mode=='moc':
             text='\n'.join(render_moc_orders(orders,output['facts'],now.date(),cutoff.strftime('%H:%M'),output.get('unemployment_data_line')))
             text='Based on prior completed signal close '+output['signal_date']+'. Confirm actual fills since that close.\n'+text
-        else:text=output['text']
+        else:text=output.get('short_text') or output['text']
         print('MESSAGE START');print(readable(text));print('MESSAGE END')
         if mode=='post' and orders:
             nxt=cal.next_session(today);nextclose=cal.session_close(nxt).tz_convert('America/New_York');deadline=nextclose-pd.Timedelta(minutes=10)
             reminder=pd.Timestamp(str(nxt.date())+' 12:28',tz='America/New_York')
             reminder=min(reminder,deadline-pd.Timedelta(minutes=90))
             print('MOC_REMINDER_AT: '+reminder.isoformat())
-            print('MOC_REMINDER_TEXT: '+'\n'.join(render_moc_orders(orders,output['facts'],nxt.date(),deadline.strftime('%H:%M'),output.get('unemployment_data_line'))))
+            print('MOC_REMINDER_TEXT START');print('\n'.join(render_moc_orders(orders,output['facts'],nxt.date(),deadline.strftime('%H:%M'),output.get('unemployment_data_line'))));print('MOC_REMINDER_TEXT END')
         return 0
     except Exception as exc:
         print(blocked_preview(facts,str(exc),now.isoformat()));return 2
