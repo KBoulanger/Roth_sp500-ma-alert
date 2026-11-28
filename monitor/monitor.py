@@ -6,8 +6,8 @@ import argparse,hashlib,importlib.util,json,os,re,sys,urllib.request
 import pandas as pd
 import exchange_calendars as xc
 
-REVISION = 'bf10ac880a5603cee90e5a493107abe2d5d61f43'
-PINS = {'send_spy_ma_telegram.py': 'fd0c48d58e1eef6d90159a79882a5804c0f3118c9a7027fc0823bebc5a02af13', 'short_report.py': '0d41dcaa05ce7af8fd79547e7ef34629669dec8f7ff57e68fe1cf48c790af131', 'joint_strategy.py': '883aa31a949d3877715688f1579b46aebd5253a197853182c8af14fae490fb3b', 'joint_runtime.py': '2be233dbe4599bbf30474183ba2030a24ce0fb131af8629f0cc47ab184c94388', 'joint_state_seed.json': '6b8d7c187434420fc89f8b7240c0c311cc56268f0a6fb196c93584fd9e2f784b', 'top7_basket.json': '224288f49de13471fc13436f9d47fa1dc1388fefa9bd9156617f584b5927483d'}
+REVISION = '3555516da7327dc14ff5ae09f2e37ee561e1ab49'
+PINS = {'send_spy_ma_telegram.py': '02a27693c156f2e47e4cd531d74726548e27006486181c4a7dd04701908bd8cc', 'short_report.py': 'cc4748b92e5a538a86f2f31d4b370a8313be11210d53c7696c26a348b445415f', 'joint_strategy.py': '883aa31a949d3877715688f1579b46aebd5253a197853182c8af14fae490fb3b', 'joint_runtime.py': '2be233dbe4599bbf30474183ba2030a24ce0fb131af8629f0cc47ab184c94388', 'joint_state_seed.json': '6b8d7c187434420fc89f8b7240c0c311cc56268f0a6fb196c93584fd9e2f784b', 'top7_basket.json': '622870e683162a30656356cfa493368b5498505c1f8eef435be2cc032ca8cb78'}
 RAW = 'https://raw.githubusercontent.com/KBoulanger/Roth_sp500-ma-alert/'
 
 def verified_bundle(repo=None,cache=None):

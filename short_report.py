@@ -165,7 +165,7 @@ def _wash_watch(losses, today):
 
 def build_short_report(ctx):
     """ctx keys: date, joint, joint_error, lev_metrics, top7, ratchet, arm_gain,
-    moc_orders, top7_warnings, losses, unemployment_revised, missing."""
+    moc_orders, top7_warnings, losses, unemployment_revised, missing, extra_notes."""
     today = _d(ctx['date'])
     trades, checks, watch, notes = [], [], [], []
     moc_orders = ctx.get('moc_orders') or []
@@ -202,6 +202,7 @@ def build_short_report(ctx):
         notes.append("⚠️ Leveraged plans not checked: " + str(ctx['joint_error']))
     for name in ctx.get('missing') or []:
         notes.append(f"⚠️ {name} data missing today.")
+    notes += list(ctx.get('extra_notes') or [])
     defensive_move = any((' buy IEF' in x or ' buy USFR' in x or ' buy SP500' in x) for x in trades)
     if ctx.get('unemployment_revised') and defensive_move:
         notes.append("Note: the IEF-or-not choice used revised unemployment figures (first-release unavailable).")

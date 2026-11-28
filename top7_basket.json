@@ -5,7 +5,7 @@
   "source": "TopK 'Top K Investing Strategy tracking.xlsx' -> Roth tab, 2026 Hybrid_80pct block. Weights are the STRATEGY output (verified reproducible from the formula to 7 decimals), NOT executed allocations.",
   "reseed_note": "RE-SEED EVERY JANUARY after the rebalance: set year, baseline_date, the 7 tickers, their hybrid_80pct weights, and each baseline close. The bot refuses to run the ratchet if year != current year.",
   "holdings": [
-    {"ticker": "SNDK", "weight": 0.693038, "baseline_close": 275.24},
+    {"ticker": "SNDK", "weight": 0.693038, "baseline_close": 34.405, "split_note": "275.24 before the 8-for-1 split of 2026-11-20"},
     {"ticker": "MU",   "weight": 0.113157, "baseline_close": 315.24},
     {"ticker": "WDC",  "weight": 0.089896, "baseline_close": 187.56},
     {"ticker": "NEM",  "weight": 0.037214, "baseline_close": 100.78},
