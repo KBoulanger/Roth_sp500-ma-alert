@@ -1,5 +1,15 @@
 # Changes
 
+## 2026-11-27 — Early monitor may read the 4 PM Nasdaq figure (read-only path only)
+
+- The read-only monitor (`monitor_mode` + dry run) may use the Nasdaq Composite value
+  published at the close, before the 5:15 PM correction deadline, so its 4:03 PM message can
+  include Top-7. It is flagged `nasdaq_preliminary`, and the message says so only when
+  30-day volatility is within half a point of a Top-7 limit.
+- `main()` also returns `top7_key` (Top-7 positions and pending orders) so a later final
+  check can tell whether the instruction changed.
+- The delivering Telegram bot is unchanged: it still waits for the final 5:15 PM value.
+
 ## 2026-11-27 — Report survives a basket data gap; SNDK split baseline (no rule change)
 
 - Cause of the nightly failures since the 20 Nov close: SNDK split 8-for-1 on 2026-11-20 and

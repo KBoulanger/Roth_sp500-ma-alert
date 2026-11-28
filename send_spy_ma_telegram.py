@@ -213,7 +213,7 @@ def assert_recent_session_continuity(df, label, end_session, session_count,
 
 
 def regular_close_from_metadata(meta, ticker, session_date, tolerance_minutes=5,
-                                allow_late_index_timestamp=False):
+                                allow_late_index_timestamp=False, allow_preliminary_index=False):
     """Validate Yahoo's regular-session close metadata for one XNYS session.
 
     `regularMarketPrice` is deliberately used instead of `lastPrice`, which can
@@ -241,7 +241,12 @@ def regular_close_from_metadata(meta, ticker, session_date, tolerance_minutes=5,
         raise ValueError(
             f"{ticker} regularMarketTime {quote_time} is not session {session_date}")
     signed_delta = (quote_time - expected_close).total_seconds()
-    if allow_late_index_timestamp:
+    if allow_preliminary_index:
+        # Early read-only monitor only: accept the index value published at or after
+        # the close, before the 5:15 PM correction deadline. Callers must label it
+        # preliminary; the delivering bot never uses this path.
+        invalid_time = signed_delta < -60
+    elif allow_late_index_timestamp:
         # Nasdaq index closing values can be corrected through 5:15 PM ET.
         # Yahoo's Nasdaq Composite metadata is therefore accepted only once its timestamp
         # reaches that final-correction boundary, never from a preliminary 4 PM
@@ -254,23 +259,25 @@ def regular_close_from_metadata(meta, ticker, session_date, tolerance_minutes=5,
         invalid_time = abs(signed_delta) > tolerance_minutes * 60
     if invalid_time:
         reason = ("is earlier than Nasdaq's 5:15 PM final-correction boundary"
-                  if allow_late_index_timestamp
+                  if allow_late_index_timestamp and not allow_preliminary_index
                   else f"is {signed_delta:.0f}s from session close")
         raise ValueError(
             f"{ticker} regularMarketTime {quote_time} {reason}")
     return price
 
 
-def fetch_yahoo_regular_close(ticker, session_date, allow_late_index_timestamp=False):
+def fetch_yahoo_regular_close(ticker, session_date, allow_late_index_timestamp=False,
+                              allow_preliminary_index=False):
     import yfinance as yf
     meta = yf.Ticker(ticker).get_history_metadata()
     return regular_close_from_metadata(
         meta, ticker, session_date,
-        allow_late_index_timestamp=allow_late_index_timestamp)
+        allow_late_index_timestamp=allow_late_index_timestamp,
+        allow_preliminary_index=allow_preliminary_index)
 
 
 def ensure_session_close(df, ticker, session_date, column="Close",
-                         allow_late_index_timestamp=False):
+                         allow_late_index_timestamp=False, allow_preliminary_index=False):
     """Cross-check or fill a Yahoo daily close using regular-close metadata."""
     out = df.copy()
     idx = pd.to_datetime(out.index)
@@ -280,7 +287,8 @@ def ensure_session_close(df, ticker, session_date, column="Close",
     session_ts = pd.Timestamp(session_date)
     quote_close = fetch_yahoo_regular_close(
         ticker, session_date,
-        allow_late_index_timestamp=allow_late_index_timestamp)
+        allow_late_index_timestamp=allow_late_index_timestamp,
+        allow_preliminary_index=allow_preliminary_index)
     existing = None
     if session_ts in out.index and column in out.columns:
         raw = out.loc[session_ts, column]
@@ -1281,13 +1289,24 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
         health["QQQ"] = True
     except Exception as e:
         print(f"WARN: QQQ fetch failed: {e}"); qqq_df = None
+    # Read-only early monitor: before 5:15 PM it may use the index value published
+    # at the close, labelled preliminary. The delivering bot always waits for final.
+    nasdaq_preliminary = bool(data_bundle.get("nasdaq_preliminary")) if data_bundle is not None else False
     try:
         nasdaqcom_df = data_bundle["nasdaq"].copy() if data_bundle is not None else (fetch_nasdaqcom() if force_partial else fetch_nasdaqcom_yfinance())
         nasdaqcom_df = frame_through_session(nasdaqcom_df, expected_session)
         if not force_partial and data_bundle is None and not historical_only:
-            nasdaqcom_df = ensure_session_close(
-                nasdaqcom_df, "^IXIC", expected_session, column="NASDAQCOM",
-                allow_late_index_timestamp=True)
+            try:
+                nasdaqcom_df = ensure_session_close(
+                    nasdaqcom_df, "^IXIC", expected_session, column="NASDAQCOM",
+                    allow_late_index_timestamp=True)
+            except ValueError as _early:
+                if not (monitor_mode and dry_run and "final-correction boundary" in str(_early)):
+                    raise
+                nasdaqcom_df = ensure_session_close(
+                    nasdaqcom_df, "^IXIC", expected_session, column="NASDAQCOM",
+                    allow_late_index_timestamp=True, allow_preliminary_index=True)
+                nasdaq_preliminary = True
         if nasdaqcom_df is None or nasdaqcom_df.empty:
             raise ValueError(f"NASDAQCOM has no row through required session {expected_session}")
         if not force_partial:
@@ -1839,6 +1858,18 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
                 'reentry_streak': e.get('reentry_streak'), 'reentry_threshold': e.get('reentry_threshold'),
                 'locked': bool(e.get('ratchet_locked')), 'has_ratchet': has_ratchet,
                 'pending': e.get('pending_order')}
+    # Preliminary Nasdaq (early monitor only): say so only when it could matter, i.e.
+    # 30-day volatility sits within half a point of a Top-7 limit.
+    from short_report import preliminary_top7_notes
+    top7_preliminary_notes = preliminary_top7_notes(
+        vol30_v if (nasdaq_preliminary and nasdaqcom_signal_fresh) else None,
+        {"Roth": ROTH_TOP7_PARAMS["vol_thr"], "brokerage": BROK_TOP7_PARAMS["vol_thr"]})
+    def _top7_key_part(key):
+        e = new_state.get(key, {}); pend = e.get('pending_order') or {}
+        return (f"{key}={e.get('signal_position') or e.get('position')}"
+                f"|{pend.get('sell', '-')}>{pend.get('buy', '-')}"
+                f"|{'guarded' if e.get('data_guarded') else 'ok'}")
+    top7_key = ";".join(_top7_key_part(k) for k in ('top7_roth', 'top7_brok'))
     short_text = build_short_report({
         'date': expected_session, 'joint': joint_results, 'joint_error': joint_error,
         'lev_metrics': {
@@ -1852,14 +1883,14 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
         'losses': facts.get('taxable_loss_sales', []),
         'unemployment_revised': unemployment_line == UNEMPLOYMENT_REVISED_LINE,
         'missing': [k for k in ('SPY', 'QQQ') if not health.get(k)],
-        'extra_notes': [basket_note] if basket_note else []})
+        'extra_notes': ([basket_note] if basket_note else []) + top7_preliminary_notes})
     if force_partial:
         short_text = "⚠️ FORCED INCOMPLETE-DATA DIAGNOSTIC — do not act on this.\n" + short_text
     if not dry_run: print(text)
     if not dry_run: send_telegram(bot_token, chat_id, short_text)
     if force_partial:
         print("Forced incomplete-data diagnostic; state intentionally not saved")
-        return {"text":text,"state":new_state,"joint":joint_results,"facts":facts,"signal_date":expected_session.isoformat(),"incomplete":True,"unemployment_data_line":unemployment_line,"short_text":short_text}
+        return {"text":text,"state":new_state,"joint":joint_results,"facts":facts,"signal_date":expected_session.isoformat(),"incomplete":True,"unemployment_data_line":unemployment_line,"short_text":short_text,"top7_key":top7_key,"nasdaq_preliminary":nasdaq_preliminary}
     meta = dict(prev.get("_meta") or {})
     meta["last_reported_market_date"] = expected_session.isoformat()
     meta["last_reported_at_et"] = current_et.isoformat()
@@ -1875,7 +1906,7 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
     new_state["_meta"] = meta
     if persist and not dry_run: save_state(new_state)
     if persist and not dry_run: print(f"State saved to {STATE_FILE}")
-    return {'text':text,'state':new_state,'joint':joint_results,'facts':facts,'signal_date':expected_session.isoformat(),'incomplete':False,'moc_orders':moc_orders,'unemployment_data_line':unemployment_line,'short_text':short_text}
+    return {'text':text,'state':new_state,'joint':joint_results,'facts':facts,'signal_date':expected_session.isoformat(),'incomplete':False,'moc_orders':moc_orders,'unemployment_data_line':unemployment_line,'short_text':short_text,'top7_key':top7_key,'nasdaq_preliminary':nasdaq_preliminary}
 
 
 if __name__ == "__main__":

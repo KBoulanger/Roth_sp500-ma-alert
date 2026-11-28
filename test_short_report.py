@@ -131,6 +131,37 @@ class ShortReportTests(unittest.TestCase):
         text = sr.build_short_report(ctx(top7=[{'label': 'Top-7 (Roth)', 'guarded': True}]))
         self.assertEqual(text, '27 Nov: NO TRADES. Nothing close.\nTop-7 not checked yet (final Nasdaq data arrives after 5:15 PM).')
 
+    def test_preliminary_nasdaq_note_only_when_borderline(self):
+        limits = {'Roth': 0.40, 'brokerage': 0.45}
+        self.assertEqual(sr.preliminary_top7_notes(0.365, limits), [])
+        self.assertEqual(sr.preliminary_top7_notes(None, limits), [])
+        notes = sr.preliminary_top7_notes(0.403, limits)
+        self.assertEqual(len(notes), 1)
+        self.assertIn('Top-7 Roth volatility is borderline (40.3% vs the 40% limit)', notes[0])
+        self.assertIn('Top-7 brokerage', sr.preliminary_top7_notes(0.446, limits)[0])
+
+    def test_preliminary_index_time_gate(self):
+        from datetime import date
+        day = date(2026, 11, 25)
+        def meta(hhmm):
+            return {'regularMarketPrice': 100.0, 'regularMarketTime': pd.Timestamp(f'2026-11-25 {hhmm}', tz='America/New_York')}
+        with self.assertRaises(ValueError):   # the delivering bot still refuses a pre-5:15 value
+            bot.regular_close_from_metadata(meta('16:16'), '^IXIC', day, allow_late_index_timestamp=True)
+        self.assertEqual(bot.regular_close_from_metadata(meta('16:16'), '^IXIC', day, allow_late_index_timestamp=True, allow_preliminary_index=True), 100.0)
+        with self.assertRaises(ValueError):   # never a value from before the close
+            bot.regular_close_from_metadata(meta('15:30'), '^IXIC', day, allow_late_index_timestamp=True, allow_preliminary_index=True)
+        self.assertEqual(bot.regular_close_from_metadata(meta('17:16'), '^IXIC', day, allow_late_index_timestamp=True), 100.0)
+
+    def test_top7_key_and_preliminary_flag_are_returned(self):
+        out, _ = run_case('entry')
+        self.assertFalse(out['nasdaq_preliminary'])
+        self.assertIn('top7_roth=', out['top7_key']); self.assertIn(';top7_brok=', out['top7_key'])
+        state = {'top7_roth': {'label': 'Top-7 (Roth)', 'state': 'defensive', 'position': 'SP500',
+                               'actual_position': 'SP500', 'signal_position': 'SP500'}}
+        flipped, _ = run_case('entry', state)
+        self.assertNotEqual(out['top7_key'], flipped['top7_key'])
+        self.assertIn('SP500>TOP-7 STOCKS', flipped['top7_key'])
+
     def test_delivery_sends_the_short_message(self):
         b = rt.load_data_bundle(FIX / 'entry.json.gz')
         with patch.dict('os.environ', {'TELEGRAM_BOT_TOKEN': 't', 'TELEGRAM_CHAT_ID': 'c', 'FORCE_REPEAT': 'true'}), \
