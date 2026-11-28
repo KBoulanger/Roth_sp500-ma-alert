@@ -1,5 +1,19 @@
 # Changes
 
+## 2026-11-27 — Report survives a basket data gap; SNDK split baseline (no rule change)
+
+- Cause of the nightly failures since the 20 Nov close: SNDK split 8-for-1 on 2026-11-20 and
+  Yahoo's SNDK daily history has had blank rows since. The bot refused to report without
+  every basket close.
+- `top7_basket.json`: SNDK `baseline_close` 275.24 -> 34.405 (same price, split-adjusted).
+- New `split_adjusted_basket_config`: if a baseline differs from split-adjusted history by a
+  whole-number split factor it is rescaled with a note; any other large mismatch is an error.
+- Basket gap handling: on the final (or a manual) attempt, if the ratchet has ALREADY fired
+  on the complete history, the report is sent with a note. The ratchet never un-fires within
+  a year, so later missing prices cannot change the Roth signal. If the ratchet has not
+  fired, the bot still refuses, as before. Earlier attempts still wait for the data.
+- Walkers, ratchet, NAV formula and all parameters are untouched (hash test unchanged).
+
 ## 2026-11-27 — Short daily message with early warnings (display only)
 
 - Telegram now sends a short message: trades first (one line per account, with the

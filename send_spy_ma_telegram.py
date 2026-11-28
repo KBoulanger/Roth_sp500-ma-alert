@@ -298,6 +298,35 @@ def ensure_session_close(df, ticker, session_date, column="Close",
     return out.sort_index()
 
 
+def split_adjusted_basket_config(cfg, closes):
+    """Keep baseline closes consistent with split-adjusted price history.
+
+    Yahoo back-adjusts every earlier close after a stock split, so a baseline
+    close typed in before the split is then N times too large (or small). When a
+    holding's baseline differs from the adjusted close on the baseline date by a
+    whole-number split factor, rescale that baseline and say so. Any other large
+    mismatch is an error. Display/data hygiene only: no rule or weight changes.
+    """
+    out = dict(cfg); out["holdings"] = [dict(h) for h in cfg["holdings"]]; notes = []
+    base_dt = pd.Timestamp(cfg["baseline_date"])
+    for h in out["holdings"]:
+        t = h["ticker"]
+        if t not in closes.columns or base_dt not in closes.index or pd.isna(closes.loc[base_dt, t]):
+            continue
+        ratio = float(h["baseline_close"]) / float(closes.loc[base_dt, t])
+        if abs(ratio - 1.0) <= 0.10:
+            continue
+        factor = round(ratio) if ratio > 1 else 1.0 / round(1.0 / ratio)
+        if factor not in (0, 1) and abs(ratio / factor - 1.0) <= 0.03:
+            h["baseline_close"] = float(h["baseline_close"]) / factor
+            kind = f"{factor:.0f}-for-1 split" if factor > 1 else f"1-for-{1 / factor:.0f} reverse split"
+            notes.append(f"{t} baseline rescaled for a {kind}; update top7_basket.json")
+        else:
+            raise ValueError(f"{t} baseline close {h['baseline_close']} does not match adjusted "
+                             f"history on {base_dt.date()} ({float(closes.loc[base_dt, t]):.2f})")
+    return out, notes
+
+
 def ensure_basket_session_closes(df, tickers, session_date):
     """Validate/fill every Top-7 close from its regular-session metadata."""
     out = df.copy()
@@ -822,7 +851,7 @@ def fetch_basket_closes(tickers):
     # request fails (rate limit, transient error). Re-fetch those individually.
     import time
     for t in tickers:
-        if close[t].notna().sum() >= 0.95 * len(close):
+        if close[t].notna().sum() >= 0.95 * len(close) and close[t].tail(5).notna().all():
             continue
         for attempt in range(3):
             time.sleep(2 * (attempt + 1))
@@ -1388,6 +1417,7 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
     ratchet = None
     ratchet_warn = None
     brok_watch = None
+    basket_note = None
     try:
         _cfg, ratchet_warn = (data_bundle.get("basket_config"), None) if data_bundle is not None else load_basket_config(TOP7_RATCHET_PARAMS["basket_file"], pd.Timestamp(expected_session))
         if _cfg is None:
@@ -1395,25 +1425,47 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
         _tickers = [h["ticker"] for h in _cfg["holdings"]]
         _closes = data_bundle["basket"].copy() if data_bundle is not None else fetch_basket_closes(_tickers)
         _closes = frame_through_session(_closes, expected_session)
+        _cfg, _split_notes = split_adjusted_basket_config(_cfg, _closes)
+        # A data-source gap in one stock (e.g. after a split) is recorded, not fatal
+        # by itself: see below. It only matters if the ratchet could still change.
+        basket_gap = None
         if not force_partial:
-            if data_bundle is None and not historical_only:
-                _closes = ensure_basket_session_closes(_closes, _tickers, expected_session)
-            assert_recent_session_continuity(
-                _closes, "Top-7 basket", expected_session, 1,
-                columns=_tickers, start_session=_cfg["baseline_date"])
+            try:
+                if data_bundle is None and not historical_only:
+                    _closes = ensure_basket_session_closes(_closes, _tickers, expected_session)
+                assert_recent_session_continuity(
+                    _closes, "Top-7 basket", expected_session, 1,
+                    columns=_tickers, start_session=_cfg["baseline_date"])
+            except Exception as _gap:
+                basket_gap = _gap
         _nav = compute_basket_nav(_cfg, _closes)
-        try:
-            brok_watch = compute_big_year_watch(_nav, BROK_BIG_YEAR_WATCH["watch_gain"])
-        except Exception as _e:
-            print(f"NOTE: big-year watch skipped ({_e})")
         _nav_latest = pd.Timestamp(_nav.index[-1]).date()
-        missing_required = required_data_missing(
-            expected_session, {"Top-7 basket": _nav_latest})
-        if missing_required and not force_partial:
-            raise RuntimeError(
+        if basket_gap is None and not force_partial and required_data_missing(
+                expected_session, {"Top-7 basket": _nav_latest}):
+            basket_gap = RuntimeError(
                 f"required session {expected_session} is not available for the Top-7 basket")
         ratchet = walk_ratchet_state(_nav, TOP7_RATCHET_PARAMS["arm_gain"],
                                      TOP7_RATCHET_PARAMS["stop_drop"])
+        if basket_gap is not None:
+            # The ratchet never un-fires within a year, so once it has fired on the
+            # complete history, later missing prices cannot change the Roth signal.
+            # Earlier scheduled attempts still wait for the data; only the final
+            # (or a manual) attempt reports without it.
+            if not ratchet["fired"] or not (final_attempt or manual_run):
+                raise basket_gap
+            ratchet_warn = (f"basket prices incomplete after {_nav_latest} ({basket_gap}); "
+                            f"ratchet already fired {pd.Timestamp(ratchet['fire_date']).date()} "
+                            "and stays locked, so the signal is unaffected. Basket figures below are as of that date.")
+            print("NOTE: " + ratchet_warn)
+            basket_note = (f"Top-7 basket prices incomplete since {_nav_latest} (data source). "
+                           "No effect: the Roth ratchet already fired and stays locked.")
+        else:
+            try:
+                brok_watch = compute_big_year_watch(_nav, BROK_BIG_YEAR_WATCH["watch_gain"])
+            except Exception as _e:
+                print(f"NOTE: big-year watch skipped ({_e})")
+        if _split_notes:
+            ratchet_warn = "; ".join(_split_notes + ([ratchet_warn] if ratchet_warn else []))
     except Exception as e:
         if monitor_mode:
             nasdaqcom_signal_fresh = False
@@ -1799,7 +1851,8 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
         'moc_orders': moc_orders, 'top7_warnings': top7_warnings,
         'losses': facts.get('taxable_loss_sales', []),
         'unemployment_revised': unemployment_line == UNEMPLOYMENT_REVISED_LINE,
-        'missing': [k for k in ('SPY', 'QQQ') if not health.get(k)]})
+        'missing': [k for k in ('SPY', 'QQQ') if not health.get(k)],
+        'extra_notes': [basket_note] if basket_note else []})
     if force_partial:
         short_text = "⚠️ FORCED INCOMPLETE-DATA DIAGNOSTIC — do not act on this.\n" + short_text
     if not dry_run: print(text)
