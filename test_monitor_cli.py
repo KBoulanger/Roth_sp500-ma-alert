@@ -11,6 +11,12 @@ class MonitorTests(unittest.TestCase):
   r=self.cli('monitor.py');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
   for text in ['Roth (TQQQ plan): sell USFR, buy QLD','Brokerage (TQQQ plan): sell USFR, buy TQQQ','SYNTHETIC','TRADE TODAY','Reminder: keep dividend reinvestment OFF in both Roth IRAs']:self.assertIn(text,r.stdout)
   self.assertNotIn('MODEL target',r.stdout)
+ def test_final_check_reports_changed_or_unchanged(self):
+  r=self.cli('monitor.py');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+  key=[x for x in r.stdout.split('\n') if x.startswith('TOP7_KEY: ')][0][len('TOP7_KEY: '):]
+  self.assertIn('NASDAQ_PRELIMINARY: no',r.stdout);self.assertNotIn('FINAL_CHECK',r.stdout)
+  same=self.cli('monitor.py',extra=['--expect-top7-key',key]);self.assertIn('FINAL_CHECK: UNCHANGED',same.stdout)
+  diff=self.cli('monitor.py',extra=['--expect-top7-key','top7_roth=SP500|->-|ok;top7_brok=SP500|->-|ok']);self.assertIn('FINAL_CHECK: CHANGED',diff.stdout)
  def test_cushion_and_guard(self):
   r=self.cli('monitor.py','cushion');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
   for text in ['Roth (TQQQ plan): sell QLD, buy TQQQ','Roth (UPRO plan): sell SSO, buy UPRO']:self.assertIn(text,r.stdout)

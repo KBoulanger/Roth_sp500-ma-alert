@@ -163,6 +163,23 @@ def _wash_watch(losses, today):
     return out
 
 
+NEAR_PRELIMINARY_VOL = 0.005   # half a volatility point from a Top-7 limit
+
+
+def preliminary_top7_notes(vol30, limits):
+    """Early monitor only. The 4 PM Nasdaq figure can still be corrected until
+    5:15 PM; say so only when 30-day volatility is close enough to a limit for a
+    correction to change that day's count."""
+    out = []
+    if vol30 is None:
+        return out
+    for label, limit in limits.items():
+        if abs(vol30 - limit) <= NEAR_PRELIMINARY_VOL:
+            out.append(f"Top-7 {label} volatility is borderline ({vol30 * 100:.1f}% vs the "
+                       f"{limit * 100:.0f}% limit) on the 4 PM Nasdaq figure; a final check runs after 5:15 PM.")
+    return out
+
+
 def build_short_report(ctx):
     """ctx keys: date, joint, joint_error, lev_metrics, top7, ratchet, arm_gain,
     moc_orders, top7_warnings, losses, unemployment_revised, missing, extra_notes."""

@@ -1,7 +1,7 @@
 """Read-only midday MOC preview using the identical verified post-close engine."""
 from pathlib import Path
 import hashlib,sys
-EXPECTED_MONITOR_SHA256 = '839ac4c0433d62c158831dafdacfd8be79d4947ca08b7f813a5e9ce8d2d7cb46'
+EXPECTED_MONITOR_SHA256 = '0ee5574c88da94178416894d95307e145893a7b20a59d5de7013f2665a57f4a6'
 path=Path(__file__).with_name('monitor.py')
 if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest()!=EXPECTED_MONITOR_SHA256:
     print('DATA NOT READY: monitor.py integrity mismatch; no trade instruction.');sys.exit(2)

@@ -6,8 +6,8 @@ import argparse,hashlib,importlib.util,json,os,re,sys,urllib.request
 import pandas as pd
 import exchange_calendars as xc
 
-REVISION = '3555516da7327dc14ff5ae09f2e37ee561e1ab49'
-PINS = {'send_spy_ma_telegram.py': '02a27693c156f2e47e4cd531d74726548e27006486181c4a7dd04701908bd8cc', 'short_report.py': 'cc4748b92e5a538a86f2f31d4b370a8313be11210d53c7696c26a348b445415f', 'joint_strategy.py': '883aa31a949d3877715688f1579b46aebd5253a197853182c8af14fae490fb3b', 'joint_runtime.py': '2be233dbe4599bbf30474183ba2030a24ce0fb131af8629f0cc47ab184c94388', 'joint_state_seed.json': '6b8d7c187434420fc89f8b7240c0c311cc56268f0a6fb196c93584fd9e2f784b', 'top7_basket.json': '622870e683162a30656356cfa493368b5498505c1f8eef435be2cc032ca8cb78'}
+REVISION = '0c5b2aa883c83c9e51471db871e91183f8547f4a'
+PINS = {'send_spy_ma_telegram.py': 'de6c30998d159c37f204fd4b92ed1d75c82c83094bec8543d218da6dac5b64db', 'short_report.py': '1e78c15eaedfaf5afa15eef87c6ff6c0ee63dafa68feeea067d334cc37efe34f', 'joint_strategy.py': '883aa31a949d3877715688f1579b46aebd5253a197853182c8af14fae490fb3b', 'joint_runtime.py': '2be233dbe4599bbf30474183ba2030a24ce0fb131af8629f0cc47ab184c94388', 'joint_state_seed.json': '6b8d7c187434420fc89f8b7240c0c311cc56268f0a6fb196c93584fd9e2f784b', 'top7_basket.json': '622870e683162a30656356cfa493368b5498505c1f8eef435be2cc032ca8cb78'}
 RAW = 'https://raw.githubusercontent.com/KBoulanger/Roth_sp500-ma-alert/'
 
 def verified_bundle(repo=None,cache=None):
@@ -37,6 +37,7 @@ def main(mode='post',argv=None):
     p.add_argument('--now',help='Explicit ISO report clock')
     p.add_argument('--spouse-export');p.add_argument('--seed');p.add_argument('--state-file')
     p.add_argument('--unemployment-json');p.add_argument('--cache-dir')
+    p.add_argument('--expect-top7-key',help='Final check: Top-7 key printed by the earlier run; reports whether it changed')
     p.add_argument('facts',nargs='*',help='LOSS=SYM@ISO@gain@account; optional SYMBOL=raw-close@date cross-check')
     args=p.parse_args(argv)
     # Cache destinations are explicit so scheduled execution never writes to an unrelated cwd.
@@ -107,6 +108,14 @@ def main(mode='post',argv=None):
             text='Based on prior completed signal close '+output['signal_date']+'. Confirm actual fills since that close.\n'+text
         else:text=output.get('short_text') or output['text']
         print('MESSAGE START');print(readable(text));print('MESSAGE END')
+        if mode=='post':
+            preliminary=bool(output.get('nasdaq_preliminary'));key=output.get('top7_key','')
+            print('TOP7_KEY: '+key)
+            print('NASDAQ_PRELIMINARY: '+('yes' if preliminary else 'no'))
+            if preliminary and 'guarded' not in key:
+                print('FINAL_CHECK_AT: '+pd.Timestamp(str(now.date())+' 17:21',tz='America/New_York').isoformat())
+            if args.expect_top7_key is not None:
+                print('FINAL_CHECK: '+('NOT FINAL YET' if preliminary or 'guarded' in key else 'UNCHANGED' if key==args.expect_top7_key else 'CHANGED'))
         if mode=='post' and orders:
             nxt=cal.next_session(today);nextclose=cal.session_close(nxt).tz_convert('America/New_York');deadline=nextclose-pd.Timedelta(minutes=10)
             reminder=pd.Timestamp(str(nxt.date())+' 12:28',tz='America/New_York')
