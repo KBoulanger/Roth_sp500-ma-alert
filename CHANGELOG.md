@@ -1,5 +1,12 @@
 # Changes
 
+## 2026-11-28 — Nasdaq final-value deadline follows the actual close (early-close fix)
+
+- The bot accepted the Nasdaq Composite close only when stamped 5:15 PM or later. On the
+  27 Nov 2026 early close (1:00 PM) the final value was stamped 2:15 PM, so the final run
+  refused it and sent a failure alert. The deadline is now 75 minutes after that session's
+  close (5:15 PM on normal days, 2:15 PM on half-days). No signal or rule changed.
+
 ## 2026-11-27 — Early monitor may read the 4 PM Nasdaq figure (read-only path only)
 
 - The read-only monitor (`monitor_mode` + dry run) may use the Nasdaq Composite value

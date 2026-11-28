@@ -212,6 +212,9 @@ def assert_recent_session_continuity(df, label, end_session, session_count,
     return True
 
 
+NASDAQ_FINAL_MINUTES_AFTER_CLOSE = 75
+
+
 def regular_close_from_metadata(meta, ticker, session_date, tolerance_minutes=5,
                                 allow_late_index_timestamp=False, allow_preliminary_index=False):
     """Validate Yahoo's regular-session close metadata for one XNYS session.
@@ -251,14 +254,15 @@ def regular_close_from_metadata(meta, ticker, session_date, tolerance_minutes=5,
         # Yahoo's Nasdaq Composite metadata is therefore accepted only once its timestamp
         # reaches that final-correction boundary, never from a preliminary 4 PM
         # value carrying the correct calendar date.
-        quote_et = quote_time.tz_convert("America/New_York")
-        final_boundary = pd.Timestamp(
-            f"{session_date.isoformat()} 17:15:00", tz="America/New_York")
-        invalid_time = quote_et < final_boundary
+        # The deadline is 75 minutes after THAT session's close: 5:15 PM on a
+        # normal day, 2:15 PM on a 1:00 PM early close (fixed 2026-11-28; a fixed
+        # 5:15 PM rejected the already-final value on half-days).
+        final_boundary = expected_close + pd.Timedelta(minutes=NASDAQ_FINAL_MINUTES_AFTER_CLOSE)
+        invalid_time = quote_time < final_boundary
     else:
         invalid_time = abs(signed_delta) > tolerance_minutes * 60
     if invalid_time:
-        reason = ("is earlier than Nasdaq's 5:15 PM final-correction boundary"
+        reason = ("is earlier than Nasdaq's final-correction boundary (75 minutes after the close)"
                   if allow_late_index_timestamp and not allow_preliminary_index
                   else f"is {signed_delta:.0f}s from session close")
         raise ValueError(
