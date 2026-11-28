@@ -33,7 +33,8 @@ class UnemploymentFallbackTests(unittest.TestCase):
   raw={'first_release':True,'as_of':'2026-11-27','observations':[dict(date=str(r.DATE.date()),value=r.UNRATE,release_date=str((r.DATE+pd.offsets.MonthBegin(1)+pd.Timedelta(days=5)).date())) for r in self.revised().itertuples()]}
   with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as folder:
    p=Path(folder)/'snapshot.json';p.write_text(json.dumps(raw))
-   with patch.dict(os.environ,{'UNEMPLOYMENT_SNAPSHOT':str(p),'FRED_API_KEY':'test-key'},clear=True),patch.object(bot.requests,'get') as get,patch.object(pd,'read_csv') as csv:
+   # Clock pinned to the snapshot's as_of date: with the real clock this test failed from 28 Nov 2026 on.
+   with patch.dict(os.environ,{'UNEMPLOYMENT_SNAPSHOT':str(p),'FRED_API_KEY':'test-key'},clear=True),patch.object(bot,'today_et',return_value=pd.Timestamp('2026-11-27').date()),patch.object(bot.requests,'get') as get,patch.object(pd,'read_csv') as csv:
     un=bot.fetch_unrate();get.assert_not_called();csv.assert_not_called()
   self.assertEqual(rt.unemployment_data_line(un),'Unemployment data: first-release.')
   b=rt.load_data_bundle(Path(__file__).parent/'tests/fixtures/entry.json.gz');b['unemployment']=un

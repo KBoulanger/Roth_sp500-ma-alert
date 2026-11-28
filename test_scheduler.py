@@ -94,6 +94,20 @@ class SchedulerTests(unittest.TestCase):
                 allow_late_index_timestamp=True),
             123.45,
         )
+        # Early close (1:00 PM): the final value is stamped 2:15 PM, not 5:15 PM.
+        half_day = date(2026, 11, 27)
+        final_half = dict(good, regularMarketTime=pd.Timestamp("2026-11-27 14:15:59", tz="America/New_York"))
+        self.assertEqual(
+            regular_close_from_metadata(final_half, "^IXIC", half_day, allow_late_index_timestamp=True), 123.45)
+        early_half = dict(good, regularMarketTime=pd.Timestamp("2026-11-27 13:05", tz="America/New_York"))
+        with self.assertRaisesRegex(ValueError, "final-correction boundary"):
+            regular_close_from_metadata(early_half, "^IXIC", half_day, allow_late_index_timestamp=True)
+        self.assertEqual(
+            regular_close_from_metadata(early_half, "^IXIC", half_day, allow_late_index_timestamp=True,
+                                        allow_preliminary_index=True), 123.45)
+        almost = dict(good, regularMarketTime=pd.Timestamp("2026-09-04 17:14", tz="America/New_York"))
+        with self.assertRaisesRegex(ValueError, "final-correction boundary"):
+            regular_close_from_metadata(almost, "^IXIC", date(2026, 9, 4), allow_late_index_timestamp=True)
 
     def test_continuity_gate_rejects_missing_intermediate_session(self):
         cal = bot.xnyse_calendar()
