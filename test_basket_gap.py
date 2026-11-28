@@ -47,7 +47,7 @@ class BasketGapTests(unittest.TestCase):
         self.assertIn('ratchet already fired', text)
         self.assertTrue(result['state']['top7_roth']['ratchet_fired'])
         self.assertEqual(result['state']['top7_roth']['state'], 'defensive')
-        self.assertIn('Top-7 basket prices incomplete since', short)
+        self.assertIn('Top-7 basket prices have gaps (data source)', short)
         self.assertIn('No effect: the Roth ratchet already fired', short)
 
     def test_gap_before_ratchet_fired_still_refuses(self):
