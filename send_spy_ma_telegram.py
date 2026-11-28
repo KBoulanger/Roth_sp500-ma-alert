@@ -1480,7 +1480,7 @@ def main(current_et=None, *, dry_run=False, persist=True, monitor_mode=False, da
                             f"ratchet already fired {pd.Timestamp(ratchet['fire_date']).date()} "
                             "and stays locked, so the signal is unaffected. Basket figures below are as of that date.")
             print("NOTE: " + ratchet_warn)
-            basket_note = (f"Top-7 basket prices incomplete since {_nav_latest} (data source). "
+            basket_note = ("Top-7 basket prices have gaps (data source). "
                            "No effect: the Roth ratchet already fired and stays locked.")
         else:
             try:
